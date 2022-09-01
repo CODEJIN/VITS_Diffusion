@@ -1,0 +1,11 @@
+/.ipynb_checkpoints
+/__pycache__
+/Modules/__pycache__
+/results
+/results_bak
+/wandb
+*.pyc
+
+temp.py
+*.pickle
+*.pts

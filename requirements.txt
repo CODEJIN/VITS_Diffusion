@@ -1,0 +1,8 @@
+Flask==2.0.1
+Flask-Cors==3.0.10
+librosa==0.8.1
+matplotlib==3.4.2
+tensorboard==2.6.0
+torch==1.10.2
+torchaudio==0.10.2
+wandb==0.12.9

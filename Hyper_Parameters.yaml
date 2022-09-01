@@ -1,0 +1,191 @@
+Sound:
+    N_FFT: 1024
+    Mel_Dim: 80
+    Frame_Length: 1024
+    Frame_Shift: 256
+    Sample_Rate: 22050
+    Mel_F_Min: 0
+    Mel_F_Max: 8000
+    F0_Min: 50
+    F0_Max: 880
+
+Feature_Type: 'Mel' #'Spectrogram', 'Mel'
+
+Tokens: 103
+Emotions: 6
+
+Encoder:
+    Size: 512
+    Conv:
+        Stack: 3
+        Kernel_Size: 5
+        Dropout_Rate: 0.5
+    LSTM:
+        Stack: 1
+        Dropout_Rate: 0.1
+    Transformer:
+        Positional_Encoding_Period: 90
+        Stack: 6
+        Head: 8
+        Dropout_Rate: 0.1
+        FFN:
+            Kernel_Size: 17
+            Dropout_Rate: 0.1
+
+Variance:
+    Duration:
+        Channels: 256
+        Kernel_Size: 17
+        Dropout_Rate: 0.1
+    Log_F0:
+        Kernel_Size: 17
+        Predictor:
+            Channels: 256
+            Kernel_Size: 17
+            Dropout_Rate: 0.1
+    Energy:
+        Kernel_Size: 17
+        Predictor:
+            Channels: 256
+            Kernel_Size: 17
+            Dropout_Rate: 0.1
+
+Decoder:
+    Transformer:
+        Positional_Encoding_Period: 90
+        Stack: 6
+        Head: 8
+        Dropout_Rate: 0.1
+        FFN:
+            Kernel_Size: 17
+            Dropout_Rate: 0.1
+
+Diffusion:
+    Max_Step: 100
+    Denoiser:
+        Channels: 256
+        Kernel_Size: 17
+        Stack: 20
+ 
+GE2E:
+    Size: 256
+    Frame_Length: 240
+    Embedding_Dict_Path: './GE2E_KREN1394.pickle'
+
+Token_Path: '/datasets/22K.KREN/Token.yaml'
+Duration_Path: './Duration_KREN1394.pickle'
+Spectrogram_Range_Info_Path: '/datasets/22K.KREN/Spectrogram_Range_Info.yaml'
+Mel_Range_Info_Path: '/datasets/22K.KREN/Mel_Range_Info.yaml'
+Log_F0_Info_Path: '/datasets/22K.KREN/Log_F0_Info.yaml'
+Energy_Info_Path: '/datasets/22K.KREN/Energy_Info.yaml'
+Speaker_Info_Path: '/datasets/22K.KREN/Speaker_Info.yaml'
+Emotion_Info_Path: '/datasets/22K.KREN/Emotion_Info.yaml'
+Language_Info_Path: '/datasets/22K.KREN/Language_Info.yaml'
+Gender_Info_Path: '/datasets/22K.KREN/Gender_Info.yaml'
+Language_and_Gender_Info_by_Speaker_Path: '/datasets/22K.KREN/Language_and_Gender_Info_by_Speaker.yaml'
+Train:
+    Use_Pattern_Cache: true
+    Train_Pattern:
+        Path: '/datasets/22K.KREN/Train'
+        Metadata_File: 'METADATA.PICKLE'
+        Feature_Length:
+            Min: 50
+            Max: 1200
+        Text_Length:
+            Min: 1
+            Max: 200
+        Accumulated_Dataset_Epoch: 1   # This is to prevent slow down from torch.utils.data.DataLoader when the number of patterns is small.
+        Augmentation_Ratio: 0.20
+    Eval_Pattern:
+        Path: '/datasets/22K.KREN/Eval'
+        Metadata_File: 'METADATA.PICKLE'
+        Feature_Length:
+            Min: 50
+            Max: 1200
+        Text_Length:
+            Min: 10
+            Max: 200
+    Num_Workers: 0
+    Batch_Size: 32
+    Learning_Rate:
+        Initial: 5.0e-4
+        Warmup_Step: 4000
+    ADAM:
+        Beta1: 0.9
+        Beta2: 0.999
+        Epsilon: 1.0e-7
+    ASR_Lambda: 0.01
+    Weight_Decay: 1.0e-6
+    Gradient_Norm: 1.0
+    Max_Step: 1000000
+    Checkpoint_Save_Interval: 5000
+    Logging_Interval: 1
+    Evaluation_Interval: 1000
+    Inference_Interval: 5000
+    Initial_Inference: true
+    Inference_in_Train:
+        Text: [
+            '스마일게이트는 팔일 버추얼 아티스트 한유아의 데뷔 음원 아이 라이크 댓 콘셉트 포토를 공개했다.',
+            'The fastest way to change yourself is to hang out with people who are already the way you want to be.',
+            'Electric vehicle market 은 확대되고 있습니다만, 그에 맞춰 charging cost 도 점차 증가하는 것으로 보입니다.',
+            '스마일게이트는 팔일 버추얼 아티스트 한유아의 데뷔 음원 아이 라이크 댓 콘셉트 포토를 공개했다.',
+            'The fastest way to change yourself is to hang out with people who are already the way you want to be.',
+            'Electric vehicle market 은 확대되고 있습니다만, 그에 맞춰 charging cost 도 점차 증가하는 것으로 보입니다.',
+            '스마일게이트는 팔일 버추얼 아티스트 한유아의 데뷔 음원 아이 라이크 댓 콘셉트 포토를 공개했다.',
+            'The fastest way to change yourself is to hang out with people who are already the way you want to be.',
+            'Electric vehicle market 은 확대되고 있습니다만, 그에 맞춰 charging cost 도 점차 증가하는 것으로 보입니다.',
+            '스마일게이트는 팔일 버추얼 아티스트 한유아의 데뷔 음원 아이 라이크 댓 콘셉트 포토를 공개했다.',
+            'The fastest way to change yourself is to hang out with people who are already the way you want to be.',
+            'Electric vehicle market 은 확대되고 있습니다만, 그에 맞춰 charging cost 도 점차 증가하는 것으로 보입니다.',
+            ]
+        Speaker: [
+            'SGHVC_Yura',
+            'SGHVC_Yura',
+            'SGHVC_Yura',
+            'LMY',
+            'LMY',
+            'LMY',
+            'Tamarinne_Normal',
+            'Tamarinne_Normal',
+            'Tamarinne_Normal',
+            'Tamarinne_Songstress',
+            'Tamarinne_Songstress',
+            'Tamarinne_Songstress',
+            ]
+        Emotion: [
+            'Neutral',
+            'Neutral',
+            'Neutral',
+            'Neutral',
+            'Neutral',
+            'Neutral',
+            'Neutral',
+            'Neutral',
+            'Neutral',
+            'Neutral',
+            'Neutral',
+            'Neutral',
+            ]
+
+Inference_Batch_Size: 256
+Ignore_Stop: true   # If true, inference is always progressed until max iteration (Stop tokens are ignored).
+
+Inference_Path: '/data/results/FastSpeech_Retry/Exp16/Inference'
+Checkpoint_Path: '/data/results/FastSpeech_Retry/Exp16/Checkpoint'
+Log_Path: '/data/results/FastSpeech_Retry/Exp16/Log'
+
+Weights_and_Biases:
+    Use: true
+    Project: 'FastSpeech_Retry'
+    Entity: 'codejin'
+    Name: 'Exp16'
+    Save_Checkpoint:
+        Use: false
+        Interval: 50000 # Unlike local, The capacity of WandB is small.
+
+Use_Mixed_Precision: true
+# Use_Multi_GPU: false
+# Device: '0'
+Use_Multi_GPU: true
+Device: '0,1,2,3,4,5,6,7'
+
