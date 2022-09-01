@@ -80,21 +80,21 @@ GE2E:
     Frame_Length: 240
     Embedding_Dict_Path: './GE2E_KREN1394.pickle'
 
-Token_Path: '/datasets/22K.KREN/Token.yaml'
+Token_Path: 'D:/Datasets/22K.Emotion/Token.yaml'
 Duration_Path: './Duration_KREN1394.pickle'
-Spectrogram_Range_Info_Path: '/datasets/22K.KREN/Spectrogram_Range_Info.yaml'
-Mel_Range_Info_Path: '/datasets/22K.KREN/Mel_Range_Info.yaml'
-Log_F0_Info_Path: '/datasets/22K.KREN/Log_F0_Info.yaml'
-Energy_Info_Path: '/datasets/22K.KREN/Energy_Info.yaml'
-Speaker_Info_Path: '/datasets/22K.KREN/Speaker_Info.yaml'
-Emotion_Info_Path: '/datasets/22K.KREN/Emotion_Info.yaml'
-Language_Info_Path: '/datasets/22K.KREN/Language_Info.yaml'
-Gender_Info_Path: '/datasets/22K.KREN/Gender_Info.yaml'
-Language_and_Gender_Info_by_Speaker_Path: '/datasets/22K.KREN/Language_and_Gender_Info_by_Speaker.yaml'
+Spectrogram_Range_Info_Path: 'D:/Datasets/22K.Emotion/Spectrogram_Range_Info.yaml'
+Mel_Range_Info_Path: 'D:/Datasets/22K.Emotion/Mel_Range_Info.yaml'
+Log_F0_Info_Path: 'D:/Datasets/22K.Emotion/Log_F0_Info.yaml'
+Energy_Info_Path: 'D:/Datasets/22K.Emotion/Energy_Info.yaml'
+Speaker_Info_Path: 'D:/Datasets/22K.Emotion/Speaker_Info.yaml'
+Emotion_Info_Path: 'D:/Datasets/22K.Emotion/Emotion_Info.yaml'
+Language_Info_Path: 'D:/Datasets/22K.Emotion/Language_Info.yaml'
+Gender_Info_Path: 'D:/Datasets/22K.Emotion/Gender_Info.yaml'
+Language_and_Gender_Info_by_Speaker_Path: 'D:/Datasets/22K.Emotion/Language_and_Gender_Info_by_Speaker.yaml'
 Train:
     Use_Pattern_Cache: true
     Train_Pattern:
-        Path: '/datasets/22K.KREN/Train'
+        Path: 'D:/Datasets/22K.Emotion/Train'
         Metadata_File: 'METADATA.PICKLE'
         Feature_Length:
             Min: 50
@@ -105,7 +105,7 @@ Train:
         Accumulated_Dataset_Epoch: 1   # This is to prevent slow down from torch.utils.data.DataLoader when the number of patterns is small.
         Augmentation_Ratio: 0.20
     Eval_Pattern:
-        Path: '/datasets/22K.KREN/Eval'
+        Path: 'D:/Datasets/22K.Emotion/Eval'
         Metadata_File: 'METADATA.PICKLE'
         Feature_Length:
             Min: 50
@@ -114,7 +114,7 @@ Train:
             Min: 10
             Max: 200
     Num_Workers: 0
-    Batch_Size: 32
+    Batch_Size: 1
     Learning_Rate:
         Initial: 5.0e-4
         Warmup_Step: 4000
@@ -145,22 +145,23 @@ Train:
 Inference_Batch_Size: 256
 Ignore_Stop: true   # If true, inference is always progressed until max iteration (Stop tokens are ignored).
 
-Inference_Path: '/data/results/FastSpeech_Retry/Exp16/Inference'
-Checkpoint_Path: '/data/results/FastSpeech_Retry/Exp16/Checkpoint'
-Log_Path: '/data/results/FastSpeech_Retry/Exp16/Log'
+Inference_Path: './results/Inference'
+Checkpoint_Path: './results/Checkpoint'
+Log_Path: './results/Log'
 
 Weights_and_Biases:
-    Use: true
-    Project: 'FastSpeech_Retry'
+    # Use: true
+    Use: false
+    Project: 'VITS_Diffusion'
     Entity: 'codejin'
-    Name: 'Exp16'
+    Name: 'Test'
     Save_Checkpoint:
         Use: false
         Interval: 50000 # Unlike local, The capacity of WandB is small.
 
 Use_Mixed_Precision: true
-# Use_Multi_GPU: false
-# Device: '0'
-Use_Multi_GPU: true
-Device: '0,1,2,3,4,5,6,7'
+Use_Multi_GPU: false
+Device: '0'
+# Use_Multi_GPU: true
+# Device: '0,1,2,3,4,5,6,7'
 

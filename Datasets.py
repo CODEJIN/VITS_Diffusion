@@ -28,21 +28,10 @@ def Feature_Stack(features, max_length: int= None):
         )
     return features
 
-def Duration_Stack(durations):
-    max_duration_length = max([duration.shape[0] for duration in durations])
-    max_duration_sum = max([duration.sum() for duration in durations])
-    durations = np.stack(
-        [np.pad(duration, [1, max_duration_length - duration.shape[0] + 1]) for duration in durations],
-        axis= 0
-        )   # <S>,<E>
-    durations[:, -1] = durations[:, -1] + max_duration_sum - durations.sum(axis=1)
-
-    return durations
-
 def Log_F0_Stack(log_f0s):
     max_log_f0_length = max([log_f0.shape[0] for log_f0 in log_f0s])
     log_f0s = np.stack(
-        [np.pad(log_f0, [1, max_log_f0_length - log_f0.shape[0] + 1], constant_values= -5.0) for log_f0 in log_f0s],
+        [np.pad(log_f0, [0, max_log_f0_length - log_f0.shape[0]], constant_values= -5.0) for log_f0 in log_f0s],
         axis= 0
         )
     return log_f0s
@@ -50,24 +39,30 @@ def Log_F0_Stack(log_f0s):
 def Energy_Stack(energies):
     max_energy_length = max([energy.shape[0] for energy in energies])
     energies = np.stack(
-        [np.pad(energy, [1, max_energy_length - energy.shape[0] + 1], constant_values= -1.5) for energy in energies],
+        [np.pad(energy, [0, max_energy_length - energy.shape[0]], constant_values= -1.5) for energy in energies],
         axis= 0
         )
     return energies
+
+def Audio_Stack(audios):
+    max_audio_length = max([audio.shape[0] for audio in audios])
+    audios = np.stack(
+        [np.pad(audio, [0, max_audio_length - audio.shape[0]]) for audio in audios],
+        axis= 0
+        )
+    return audios
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(
         self,
         token_dict: Dict[str, int],
         feature_range_info_dict: Dict[str, Dict[str, float]],
-        duration_dict: Dict[str, np.array],
         log_f0_info_dict: Dict[str, Dict[str, float]],
         energy_info_dict: Dict[str, Dict[str, float]],
         ge2e_dict: Dict[str, int],
         emotion_info_dict: Dict[str, int],
         pattern_path: str,
         metadata_file: str,
-        feature_type: str,
         feature_length_min: int,
         feature_length_max: int,
         text_length_min: int,
@@ -78,19 +73,12 @@ class Dataset(torch.utils.data.Dataset):
         super().__init__()
         self.token_dict = token_dict
         self.feature_range_info_dict = feature_range_info_dict
-        self.duration_dict = duration_dict
         self.log_f0_info_dict = log_f0_info_dict
         self.energy_info_dict = energy_info_dict
         self.ge2e_dict = ge2e_dict
         self.emotion_info_dict = emotion_info_dict
         self.pattern_path = pattern_path
-        self.feature_type = feature_type
-
-        if feature_type == 'Mel':
-            feature_length_dict = 'Mel_Length_Dict'
-        elif feature_type == 'Spectrogram':
-            feature_length_dict = 'Spectrogram_Length_Dict'
-
+        
         metadata_dict = pickle.load(open(
             os.path.join(pattern_path, metadata_file).replace('\\', '/'), 'rb'
             ))
@@ -109,11 +97,10 @@ class Dataset(torch.utils.data.Dataset):
         self.patterns = [
             x for x in self.patterns
             if all([
-                metadata_dict[feature_length_dict][x] >= feature_length_min,
-                metadata_dict[feature_length_dict][x] <= feature_length_max,
+                metadata_dict['Spectrogram_Length_Dict'][x] >= feature_length_min,
+                metadata_dict['Spectrogram_Length_Dict'][x] <= feature_length_max,
                 metadata_dict['Text_Length_Dict'][x] >= text_length_min,
-                metadata_dict['Text_Length_Dict'][x] <= text_length_max,
-                x in duration_dict.keys()
+                metadata_dict['Text_Length_Dict'][x] <= text_length_max
                 ])
             ] * accumulated_dataset_epoch
 
@@ -124,42 +111,17 @@ class Dataset(torch.utils.data.Dataset):
         emotion = pattern_dict['Emotion']
         
         token = Text_to_Token(pattern_dict['Decomposed'], self.token_dict)
-        feature = pattern_dict[self.feature_type]
+        feature = pattern_dict['Spectrogram']
         feature_min = self.feature_range_info_dict[speaker]['Min']
         feature_max = self.feature_range_info_dict[speaker]['Max']
         feature = (feature - feature_min) / (feature_max - feature_min) * 2.0 - 1.0
 
-        duration = self.duration_dict[self.patterns[idx]]
-        if duration.sum() < feature.shape[0]:
-            duration[-1] += feature.shape[0] - duration.sum()
-        elif duration.sum() > feature.shape[0]:
-            print(path, duration.sum(), feature.shape[0])
-            assert False
+        log_f0 = (pattern_dict['Log_F0'] - self.log_f0_info_dict[speaker]['Mean']) / self.log_f0_info_dict[speaker]['Std']
+        log_f0 = np.clip(log_f0, -5.0, np.inf)
+        energy = (pattern_dict['Energy'] - self.energy_info_dict[speaker]['Mean']) / self.energy_info_dict[speaker]['Std']
+        energy = np.clip(energy, -1.5, np.inf)
 
-        log_f0_list, energy_list = [], []
-        current_index = 0
-        for length in duration:
-            if length == 0:
-                log_f0_list.append(-5.0)
-                energy_list.append(-2.0)
-                continue
-
-            log_f0 = pattern_dict['Log_F0'][current_index:current_index + length]
-            log_f0 = [x for x in log_f0 if x > 0.0]
-            if len(log_f0) == 0 or len(log_f0) < length // 2:
-                log_f0_list.append(-5.0)
-            else:
-                log_f0 = sum(log_f0) / len(log_f0)
-                log_f0 = (log_f0 - self.log_f0_info_dict[speaker]['Mean']) / self.log_f0_info_dict[speaker]['Std']
-                log_f0_list.append(log_f0)
-            
-            energy = pattern_dict['Energy'][current_index:current_index + length]
-            energy = (energy.mean() - self.energy_info_dict[speaker]['Mean']) / self.energy_info_dict[speaker]['Std']
-            energy_list.append(energy)
-
-            current_index += length
-
-        return token, feature, duration, np.array(log_f0_list), np.array(energy_list), self.ge2e_dict[speaker], self.emotion_info_dict[emotion]
+        return token, self.ge2e_dict[speaker], self.emotion_info_dict[emotion], feature, log_f0, energy, pattern_dict['Audio']
 
     def __len__(self):
         return len(self.patterns)
@@ -213,28 +175,31 @@ class Collater:
         self.token_dict = token_dict
 
     def __call__(self, batch):
-        tokens, features, durations, log_f0s, energies, ge2es, emotions = zip(*batch)
+        tokens, ge2es, emotions, features, log_f0s, energies, audios  = zip(*batch)
         token_lengths = np.array([token.shape[0] for token in tokens])
         feature_lengths = np.array([feature.shape[0] for feature in features])
+        audio_lengths = np.array([audio.shape[0] for audio in audios])
 
         tokens = Token_Stack(tokens, self.token_dict)
+        ge2es = np.array(ge2es)
+
         features = Feature_Stack(features)
-        durations = Duration_Stack(durations).astype(np.int32)
         log_f0s = Log_F0_Stack(log_f0s)
         energies = Energy_Stack(energies)
-        ge2es = np.array(ge2es)
+        audios = Audio_Stack(audios)
 
         tokens = torch.LongTensor(tokens)   # [Batch, Token_t]
         token_lengths = torch.LongTensor(token_lengths)   # [Batch]
         features = torch.FloatTensor(features).permute(0, 2, 1)   # [Batch, Feature_d, Featpure_t]
-        feature_lengths = torch.LongTensor(feature_lengths)   # [Batch]
-        durations = torch.LongTensor(durations)   # [Batch, Token_t]
-        log_f0s = torch.FloatTensor(log_f0s)    # [Batch, Token_t]
-        energies = torch.FloatTensor(energies)  # [Batch, Token_t]
         ge2es = torch.FloatTensor(ge2es)   # [Batch, GE2E_dim]
         emotions = torch.LongTensor(emotions)  # [Batch]
+        feature_lengths = torch.LongTensor(feature_lengths)   # [Batch]
+        log_f0s = torch.FloatTensor(log_f0s)    # [Batch, Feature_t]
+        energies = torch.FloatTensor(energies)  # [Batch, Feature_t]
+        audios = torch.FloatTensor(audios)  # [Batch, Audio_t]
+        audio_lengths = torch.LongTensor(audio_lengths)   # [Batch]
 
-        return tokens, token_lengths, ge2es, emotions, features, feature_lengths, durations, log_f0s, energies
+        return tokens, token_lengths, ge2es, emotions, features, feature_lengths, log_f0s, energies, audios, audio_lengths
 
 class Inference_Collater:
     def __init__(self,

@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from librosa import griffinlim
 from scipy.io import wavfile
 
-from Modules.Modules import VITS_Diff, Mask_Generate
+from Modules.Modules import VITS_Diff, Mask_Generate, KL_Loss
 
 from Datasets import Dataset, Inference_Dataset, Collater, Inference_Collater
 from Noam_Scheduler import Noam_Scheduler
@@ -82,28 +82,21 @@ class Trainer:
 
     def Dataset_Generate(self):
         token_dict = yaml.load(open(self.hp.Token_Path), Loader=yaml.Loader)
-        duration_dict = pickle.load(open(self.hp.Duration_Path, 'rb'))
         log_f0_info_dict = yaml.load(open(self.hp.Log_F0_Info_Path), Loader=yaml.Loader)
         energy_info_dict = yaml.load(open(self.hp.Energy_Info_Path), Loader=yaml.Loader)        
         emotion_info_dict = yaml.load(open(self.hp.Emotion_Info_Path), Loader=yaml.Loader)        
         ge2e_dict = pickle.load(open(self.hp.GE2E.Embedding_Dict_Path, 'rb'))
-
-        if self.hp.Feature_Type == 'Spectrogram':
-            self.feature_range_info_dict = yaml.load(open(self.hp.Spectrogram_Range_Info_Path), Loader=yaml.Loader)
-        if self.hp.Feature_Type == 'Mel':
-            self.feature_range_info_dict = yaml.load(open(self.hp.Mel_Range_Info_Path), Loader=yaml.Loader)
+        feature_range_info_dict = yaml.load(open(self.hp.Spectrogram_Range_Info_Path), Loader=yaml.Loader)
 
         train_dataset = Dataset(
             token_dict= token_dict,
-            feature_range_info_dict= self.feature_range_info_dict,
-            duration_dict= duration_dict,
+            feature_range_info_dict= feature_range_info_dict,
             log_f0_info_dict= log_f0_info_dict,
             energy_info_dict= energy_info_dict,
             ge2e_dict= ge2e_dict,
             emotion_info_dict= emotion_info_dict,
             pattern_path= self.hp.Train.Train_Pattern.Path,
             metadata_file= self.hp.Train.Train_Pattern.Metadata_File,
-            feature_type= self.hp.Feature_Type,
             feature_length_min= self.hp.Train.Train_Pattern.Feature_Length.Min,
             feature_length_max= self.hp.Train.Train_Pattern.Feature_Length.Max,
             text_length_min= self.hp.Train.Train_Pattern.Text_Length.Min,
@@ -113,15 +106,13 @@ class Trainer:
             )
         eval_dataset = Dataset(
             token_dict= token_dict,
-            feature_range_info_dict= self.feature_range_info_dict,
-            duration_dict= duration_dict,
+            feature_range_info_dict= feature_range_info_dict,
             log_f0_info_dict= log_f0_info_dict,
             energy_info_dict= energy_info_dict,
             ge2e_dict= ge2e_dict,
             emotion_info_dict= emotion_info_dict,
             pattern_path= self.hp.Train.Eval_Pattern.Path,
             metadata_file= self.hp.Train.Eval_Pattern.Metadata_File,
-            feature_type= self.hp.Feature_Type,
             feature_length_min= self.hp.Train.Eval_Pattern.Feature_Length.Min,
             feature_length_max= self.hp.Train.Eval_Pattern.Feature_Length.Max,
             text_length_min= self.hp.Train.Eval_Pattern.Text_Length.Min,
@@ -183,6 +174,7 @@ class Trainer:
         self.criterion_dict = {
             'MSE': torch.nn.MSELoss(reduce= None).to(self.device),
             'MAE': torch.nn.L1Loss(reduce= None).to(self.device),
+            'KL': KL_Loss
             }
         self.optimizer = torch.optim.NAdam(
             params= self.model.parameters(),
@@ -195,9 +187,6 @@ class Trainer:
             optimizer= self.optimizer,
             warmup_steps= self.hp.Train.Learning_Rate.Warmup_Step,
             )
-        
-        if self.hp.Feature_Type == 'Mel':
-            self.vocoder = torch.jit.load('hifigan_jit_0265.pts', map_location='cpu').to(self.device)
 
         self.scaler = torch.cuda.amp.GradScaler(enabled= self.hp.Use_Mixed_Precision)
 
@@ -205,7 +194,7 @@ class Trainer:
             logging.info(self.model)
 
 
-    def Train_Step(self, tokens, token_lengths, ge2es, emotions, features, feature_lengths, durations, log_f0s, energies):
+    def Train_Step(self, tokens, token_lengths, ge2es, emotions, features, feature_lengths, log_f0s, energies, audios, audio_lengths):
         loss_dict = {}
         tokens = tokens.to(self.device, non_blocking=True)
         token_lengths = token_lengths.to(self.device, non_blocking=True)
@@ -213,23 +202,33 @@ class Trainer:
         emotions = emotions.to(self.device, non_blocking=True)
         features = features.to(self.device, non_blocking=True)
         feature_lengths = feature_lengths.to(self.device, non_blocking=True)
-        durations = durations.to(self.device, non_blocking=True)
         log_f0s = log_f0s.to(self.device, non_blocking=True)
         energies = energies.to(self.device, non_blocking=True)
+        audios = audios.to(self.device, non_blocking=True)
+        audio_lengths = audio_lengths.to(self.device, non_blocking=True)
 
         with torch.cuda.amp.autocast(enabled= self.hp.Use_Mixed_Precision):
-            linear_predictions, diffusion_predictions, noises, epsilons, \
-            log_duration_predictions, log_f0_predictions, energy_predictions = self.model(
+            predictions, noises, epsilons, \
+            duration_targets, log_f0_targets, energy_targets, \
+            log_duration_predictions, log_f0_predictions, energy_predictions, \
+            encodings, means_p, log_stds_p, \
+            posterior_encodings, means_q, log_stds_q, \
+            posterior_encodings_p = self.model(
                 tokens= tokens,
                 token_lengths= token_lengths,
                 ge2es= ge2es,
                 emotions= emotions,
                 features= features,
-                durations= durations,
+                feature_lengths= feature_lengths,
                 log_f0s= log_f0s,
                 energies= energies,
+                audios= audios
                 )
 
+            audio_masks = Mask_Generate(
+                lengths= audio_lengths,
+                max_length= audios.size(1)
+                ).to(audios.device)   # [Batch, Audio_t]
             feature_masks = Mask_Generate(
                 lengths= feature_lengths,
                 max_length= features.size(2)
@@ -238,31 +237,39 @@ class Trainer:
                 lengths= token_lengths,
                 max_length= tokens.size(1)
                 ).to(tokens.device)
-            
-            loss_dict['Linear'] = (self.criterion_dict['MAE'](
-                linear_predictions,
-                features
-                ) * ~feature_masks.unsqueeze(1)).mean()
+
             loss_dict['Diffusion'] = (self.criterion_dict['MAE'](
                 noises,
                 epsilons
-                ) * ~feature_masks.unsqueeze(1)).mean()
+                ) * ~audio_masks).mean()
             loss_dict['Log_Duration'] = (self.criterion_dict['MSE'](
                 log_duration_predictions,
-                (durations.float() + 1).log()
+                (duration_targets.float() + 1).log()
                 ) * ~token_masks).mean()
             loss_dict['Log_F0'] = (self.criterion_dict['MSE'](
                 log_f0_predictions,
-                log_f0s
+                log_f0_targets
                 ) * ~token_masks).mean()
             loss_dict['Energy'] = (self.criterion_dict['MSE'](
                 energy_predictions,
-                energies
+                energy_targets
                 ) * ~token_masks).mean()
-            losses = loss_dict['Linear'] + loss_dict['Diffusion'] + loss_dict['Log_Duration'] + loss_dict['Log_F0'] + loss_dict['Energy']
-
+            loss_dict['KL'] = self.criterion_dict['KL'](
+                posterior_encodings_p= posterior_encodings_p,
+                log_stds_q= log_stds_q,
+                means_p= means_p,
+                log_stds_p= log_stds_p,
+                feature_masks= (~feature_masks).unsqueeze(1).float()
+                )
+            
         self.optimizer.zero_grad()
-        self.scaler.scale(losses).backward()
+        self.scaler.scale(
+            loss_dict['Diffusion'] +
+            loss_dict['Log_Duration'] +
+            loss_dict['Log_F0'] +
+            loss_dict['Energy'] +
+            loss_dict['KL']
+            ).backward()
 
         if self.hp.Train.Gradient_Norm > 0.0:
             self.scaler.unscale_(self.optimizer)
@@ -282,7 +289,7 @@ class Trainer:
             self.scalar_dict['Train']['Loss/{}'.format(tag)] += loss
 
     def Train_Epoch(self):
-        for tokens, token_lengths, ge2es, emotions, features, feature_lengths, durations, log_f0s, energies in self.dataloader_dict['Train']:
+        for tokens, token_lengths, ge2es, emotions, features, feature_lengths, log_f0s, energies, audios, audio_lengths in self.dataloader_dict['Train']:
             self.Train_Step(
                 tokens= tokens,
                 token_lengths= token_lengths,
@@ -290,9 +297,10 @@ class Trainer:
                 emotions= emotions,
                 features= features,
                 feature_lengths= feature_lengths,
-                durations= durations,
                 log_f0s= log_f0s,
                 energies= energies,
+                audios= audios,
+                audio_lengths= audio_lengths
                 )
 
             if self.steps % self.hp.Train.Checkpoint_Save_Interval == 0:
@@ -327,7 +335,7 @@ class Trainer:
 
 
     @torch.no_grad()
-    def Evaluation_Step(self, tokens, token_lengths, ge2es, emotions, features, feature_lengths, durations, log_f0s, energies):
+    def Evaluation_Step(self, tokens, token_lengths, ge2es, emotions, features, feature_lengths, log_f0s, energies, audios, audio_lengths):
         loss_dict = {}
         tokens = tokens.to(self.device, non_blocking=True)
         token_lengths = token_lengths.to(self.device, non_blocking=True)
@@ -335,22 +343,32 @@ class Trainer:
         emotions = emotions.to(self.device, non_blocking=True)
         features = features.to(self.device, non_blocking=True)
         feature_lengths = feature_lengths.to(self.device, non_blocking=True)
-        durations = durations.to(self.device, non_blocking=True)
         log_f0s = log_f0s.to(self.device, non_blocking=True)
         energies = energies.to(self.device, non_blocking=True)
+        audios = audios.to(self.device, non_blocking=True)
+        audio_lengths = audio_lengths.to(self.device, non_blocking=True)
 
-        linear_predictions, diffusion_predictions, noises, epsilons, \
-        log_duration_predictions, log_f0_predictions, energy_predictions = self.model(
+        predictions, noises, epsilons, \
+        duration_targets, log_f0_targets, energy_targets, \
+        log_duration_predictions, log_f0_predictions, energy_predictions, \
+        encodings, means_p, log_stds_p, \
+        posterior_encodings, means_q, log_stds_q, \
+        posterior_encodings_p = self.model(
             tokens= tokens,
             token_lengths= token_lengths,
             ge2es= ge2es,
             emotions= emotions,
             features= features,
-            durations= durations,
+            feature_lengths= feature_lengths,
             log_f0s= log_f0s,
             energies= energies,
+            audios= audios
             )
 
+        audio_masks = Mask_Generate(
+            lengths= audio_lengths,
+            max_length= audios.size(1)
+            ).to(audios.device)   # [Batch, Audio_t]
         feature_masks = Mask_Generate(
             lengths= feature_lengths,
             max_length= features.size(2)
@@ -360,56 +378,68 @@ class Trainer:
             max_length= tokens.size(1)
             ).to(tokens.device)
 
-        loss_dict['Linear'] = (self.criterion_dict['MAE'](
-            linear_predictions,
-            features
-            ) * ~feature_masks.unsqueeze(1)).mean()
         loss_dict['Diffusion'] = (self.criterion_dict['MAE'](
             noises,
             epsilons
-            ) * ~feature_masks.unsqueeze(1)).mean()
+            ) * ~audio_masks).mean()
         loss_dict['Log_Duration'] = (self.criterion_dict['MSE'](
             log_duration_predictions,
-            (durations.float() + 1).log()
+            (duration_targets.float() + 1).log()
             ) * ~token_masks).mean()
         loss_dict['Log_F0'] = (self.criterion_dict['MSE'](
             log_f0_predictions,
-            log_f0s
+            log_f0_targets
             ) * ~token_masks).mean()
         loss_dict['Energy'] = (self.criterion_dict['MSE'](
             energy_predictions,
-            energies
+            energy_targets
             ) * ~token_masks).mean()
+        loss_dict['KL'] = self.criterion_dict['KL'](
+            posterior_encodings_p= posterior_encodings_p,
+            log_stds_q= log_stds_q,
+            means_p= means_p,
+            log_stds_p= log_stds_p,
+            feature_masks= (~feature_masks).unsqueeze(1).float()
+            )
 
         for tag, loss in loss_dict.items():
             loss = reduce_tensor(loss.data, self.num_gpus).item() if self.num_gpus > 1 else loss.item()
             self.scalar_dict['Evaluation']['Loss/{}'.format(tag)] += loss
 
         return \
-            linear_predictions, diffusion_predictions, noises, epsilons, \
-            log_duration_predictions, log_f0_predictions, energy_predictions
+            predictions, noises, epsilons, \
+            duration_targets, log_f0_targets, energy_targets, \
+            log_duration_predictions, log_f0_predictions, energy_predictions, \
+            encodings, means_p, log_stds_p, \
+            posterior_encodings, means_q, log_stds_q, \
+            posterior_encodings_p
 
     def Evaluation_Epoch(self):
         logging.info('(Steps: {}) Start evaluation in GPU {}.'.format(self.steps, self.gpu_id))
 
         self.model.eval()
 
-        for step, (tokens, token_lengths, ge2es, emotions, features, feature_lengths, durations, log_f0s, energies) in tqdm(
+        for step, (tokens, token_lengths, ge2es, emotions, features, feature_lengths, log_f0s, energies, audios, audio_lengths) in tqdm(
             enumerate(self.dataloader_dict['Eval'], 1),
             desc='[Evaluation]',
             total= math.ceil(len(self.dataloader_dict['Eval'].dataset) / self.hp.Train.Batch_Size / self.num_gpus)
             ):
-            linear_predictions, diffusion_predictions, noises, epsilons, \
-            log_duration_predictions, log_f0_predictions, energy_predictions = self.Evaluation_Step(
+            predictions, noises, epsilons, \
+            duration_targets, log_f0_targets, energy_targets, \
+            log_duration_predictions, log_f0_predictions, energy_predictions, \
+            encodings, means_p, log_stds_p, \
+            posterior_encodings, means_q, log_stds_q, \
+            posterior_encodings_p = self.Evaluation_Step(
                 tokens= tokens,
                 token_lengths= token_lengths,
                 ge2es= ge2es,
                 emotions= emotions,
                 features= features,
                 feature_lengths= feature_lengths,
-                durations= durations,
                 log_f0s= log_f0s,
                 energies= energies,
+                audios= audios,
+                audio_lengths= audio_lengths
                 )
 
         if self.gpu_id == 0:
@@ -418,64 +448,39 @@ class Trainer:
                 for tag, loss in self.scalar_dict['Evaluation'].items()
                 }
             self.writer_dict['Evaluation'].add_scalar_dict(self.scalar_dict['Evaluation'], self.steps)
-            self.writer_dict['Evaluation'].add_histogram_model(self.model, 'JDITDiffTTS', self.steps, delete_keywords=[])
+            self.writer_dict['Evaluation'].add_histogram_model(self.model, 'VITS_Diffusion', self.steps, delete_keywords=[])
         
             index = np.random.randint(0, tokens.size(0))
 
             with torch.no_grad():
-                _, diffusion_prediction_feature, *_ = self.model(
+                prediction_audio, *_ = self.model(
                     tokens= tokens[index].unsqueeze(0).to(self.device),
                     token_lengths= token_lengths[index].unsqueeze(0).to(self.device),
                     ge2es= ge2es[index].unsqueeze(0).to(self.device),
-                    emotions= emotions[index].unsqueeze(0).to(self.device),
-                    durations= durations[index].unsqueeze(0).to(self.device),
-                    log_f0s= log_f0s[index].unsqueeze(0).to(self.device),
-                    energies= energies[index].unsqueeze(0).to(self.device),
+                    emotions= emotions[index].unsqueeze(0).to(self.device),                    
                     )
-                diffusion_prediction_feature = diffusion_prediction_feature.clamp(-1.0, 1.0)
 
-            feature_max = max([x['Max'] for x in self.feature_range_info_dict.values()])
-            feature_min = min([x['Min'] for x in self.feature_range_info_dict.values()])
-
-            target_feature = (features[index, :, :feature_lengths[index]].unsqueeze(0) + 1.0) / 2.0 * (feature_max - feature_min) + feature_min
-            linear_prediction_feature = (linear_predictions[index, :, :feature_lengths[index]].clamp(-1.0, 1.0).unsqueeze(0) + 1.0) / 2.0 * (feature_max - feature_min) + feature_min
-            diffusion_prediction_feature = (diffusion_prediction_feature[:, :, :feature_lengths[index]] + 1.0) / 2.0 * (feature_max - feature_min) + feature_min
+            target_audio = audios[index].cpu().numpy()
+            prediction_audio = prediction_audio[0].clamp(-1.0, 1.0).cpu().numpy()
             
-            if self.hp.Feature_Type == 'Mel':
-                target_audio = self.vocoder(target_feature.to(self.device)).squeeze(0).cpu().numpy() / 32768.0
-                linear_prediction_audio = self.vocoder(linear_prediction_feature.to(self.device)).squeeze(0).cpu().numpy() / 32768.0
-                diffusion_prediction_audio = self.vocoder(diffusion_prediction_feature.to(self.device)).squeeze(0).cpu().numpy() / 32768.0
-            elif self.hp.Feature_Type == 'Spectrogram':
-                target_audio = griffinlim(spectral_de_normalize_torch(target_feature.squeeze(0)).cpu().numpy())
-                linear_prediction_audio = griffinlim(spectral_de_normalize_torch(linear_prediction_feature.squeeze(0)).cpu().numpy())
-                diffusion_prediction_audio = griffinlim(spectral_de_normalize_torch(diffusion_prediction_feature.squeeze(0)).cpu().numpy())
-
-            target_feature = target_feature.squeeze(0)
-            linear_prediction_feature = linear_prediction_feature.squeeze(0)
-            diffusion_prediction_feature = diffusion_prediction_feature.squeeze(0)
-            
-            duration_target = durations[index, :token_lengths[index]]
+            duration_target = duration_targets[index, :token_lengths[index]]
             duration_target = torch.arange(duration_target.size(0)).repeat_interleave(duration_target.cpu()).numpy()
-            duration_prediction = (torch.exp(log_duration_predictions[index, :token_lengths[index]]) - 1).clamp(0, 50).ceil().long()
+            duration_prediction = (torch.exp(log_duration_predictions[index, :token_lengths[index]]) - 1).clamp(3, 50).ceil().long()
             duration_prediction = torch.arange(duration_prediction.size(0)).repeat_interleave(duration_prediction.cpu()).numpy()
             
             image_dict = {
-                'Feature/Target': (target_feature.cpu().numpy(), None, 'auto', None, None, None),
-                'Feature/Linear': (linear_prediction_feature.cpu().numpy(), None, 'auto', None, None, None),
-                'Feature/Diffusion': (diffusion_prediction_feature.cpu().numpy(), None, 'auto', None, None, None),
-                'Diffusion/Noise': (noises[index, :, :feature_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),
-                'Diffusion/Epsilon': (epsilons[index, :, :feature_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),                
+                'Diffusion/Noise': (noises[index, :audio_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),
+                'Diffusion/Epsilon': (epsilons[index, :audio_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),                
                 'Duration/Target': (duration_target[:feature_lengths[index]], None, 'auto', (0, features.size(2)), (0, tokens.size(1)), None),
                 'Duration/Prediction': (duration_prediction[:feature_lengths[index]], None, 'auto', (0, features.size(2)), (0, tokens.size(1)), None),
-                'Log_F0/Target': (log_f0s[index, :token_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),
+                'Log_F0/Target': (log_f0_targets[index, :token_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),
                 'Log_F0/Prediction': (log_f0_predictions[index, :token_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),
-                'Energy/Target': (energies[index, :token_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),
+                'Energy/Target': (energy_targets[index, :token_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),
                 'Energy/Prediction': (energy_predictions[index, :token_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),           
                 }
             audio_dict = {
                 'Audio/Target': (target_audio, self.hp.Sound.Sample_Rate),
-                'Audio/Linear': (linear_prediction_audio, self.hp.Sound.Sample_Rate),
-                'Audio/Diffusion': (diffusion_prediction_audio, self.hp.Sound.Sample_Rate),
+                'Audio/Prediction': (prediction_audio, self.hp.Sound.Sample_Rate),
                 }
 
             self.writer_dict['Evaluation'].add_image_dict(image_dict, self.steps)
@@ -492,11 +497,8 @@ class Trainer:
                     )
                 wandb.log(
                     data= {
-                    'Evaluation.Feature.Target': wandb.Image(target_feature.cpu().numpy()),
-                    'Evaluation.Feature.Linear': wandb.Image(linear_prediction_feature.cpu().numpy()),
-                    'Evaluation.Feature.Diffusion': wandb.Image(diffusion_prediction_feature.cpu().numpy()),                    
-                    'Evaluation.Diffusion.Nosie': wandb.Image(noises[index, :, :feature_lengths[index]].cpu().numpy()),
-                    'Evaluation.Diffusion.Epsilon': wandb.Image(epsilons[index, :, :feature_lengths[index]].cpu().numpy()),
+                    'Evaluation.Diffusion.Nosie': wandb.Image(noises[index, :feature_lengths[index]].cpu().numpy()),
+                    'Evaluation.Diffusion.Epsilon': wandb.Image(epsilons[index, :feature_lengths[index]].cpu().numpy()),
                     'Evaluation.Duration': wandb.plot.line_series(
                         xs= np.arange(feature_lengths[index].cpu().numpy()),
                         ys= [
@@ -532,15 +534,10 @@ class Trainer:
                         sample_rate= self.hp.Sound.Sample_Rate,
                         caption= 'Target_Audio'
                         ),
-                    'Evaluation.Audio.Linear': wandb.Audio(
-                        linear_prediction_audio,
+                    'Evaluation.Audio.Prediction': wandb.Audio(
+                        prediction_audio,
                         sample_rate= self.hp.Sound.Sample_Rate,
-                        caption= 'Diffusion_Audio'
-                        ),
-                    'Evaluation.Audio.Diffusion': wandb.Audio(
-                        diffusion_prediction_audio,
-                        sample_rate= self.hp.Sound.Sample_Rate,
-                        caption= 'Diffusion_Audio'
+                        caption= 'Prediction_Audio'
                         ),
                     },
                     step= self.steps,
@@ -551,7 +548,6 @@ class Trainer:
 
         self.model.train()
 
-
     @torch.no_grad()
     def Inference_Step(self, tokens, token_lengths, ge2es, emotions, texts, decomposed_texts, speaker_labels, emotion_labels, start_index= 0, tag_step= False):
         tokens = tokens.to(self.device, non_blocking=True)
@@ -559,65 +555,23 @@ class Trainer:
         ge2es = ge2es.to(self.device, non_blocking=True)
         emotions = emotions.to(self.device, non_blocking=True)
         
-        linear_predictions, diffusion_predictions, noises, epsilons, \
-        log_duration_predictions, log_f0_predictions, energy_predictions = self.model(
+        predictions, _, _, _, _, _, log_duration_predictions, log_f0_predictions, energy_predictions, *_ = self.model(
             tokens= tokens,
             token_lengths= token_lengths,
             ge2es= ge2es,
             emotions= emotions
             )
-        linear_predictions = linear_predictions.clamp(-1.0, 1.0)
-        diffusion_predictions = diffusion_predictions.clamp(-1.0, 1.0)
-        linear_prediction_list = []
-        diffusion_prediction_list = []
-        for linear_prediction, diffusion_prediction, speaker in zip(linear_predictions, diffusion_predictions, speaker_labels):
-            feature_max = self.feature_range_info_dict[speaker]['Max']
-            feature_min = self.feature_range_info_dict[speaker]['Min']
-            linear_prediction_list.append((linear_prediction + 1.0) / 2.0 * (feature_max - feature_min) + feature_min)
-            diffusion_prediction_list.append((diffusion_prediction + 1.0) / 2.0 * (feature_max - feature_min) + feature_min)
-        linear_predictions = torch.stack(linear_prediction_list, dim= 0)
-        diffusion_predictions = torch.stack(diffusion_prediction_list, dim= 0)
+        predictions = predictions.clamp(-1.0, 1.0)        
 
         durations = (log_duration_predictions.exp() - 1).clamp(0, 50).ceil().long()
         feature_lengths = [
             int(duration[:token_length].sum())
             for duration, token_length in zip(durations, token_lengths)
             ]
-
-        if any([length < 30 for length in feature_lengths]):
-            logging.warning('An inference feature length is less than 30. Inference is skipped to prevent vocoder error.')
-            return
-
-        if self.hp.Feature_Type == 'Mel':
-            linear_audios = [
-                audio[:min(length * self.hp.Sound.Frame_Shift, audio.size(0))].cpu().numpy()
-                for audio, length in zip(
-                    self.vocoder(linear_predictions),
-                    feature_lengths
-                    )
-                ]
-            diffusion_audios = [
-                audio[:min(length * self.hp.Sound.Frame_Shift, audio.size(0))].cpu().numpy()
-                for audio, length in zip(
-                    self.vocoder(diffusion_predictions),
-                    feature_lengths
-                    )
-                ]
-        elif self.hp.Feature_Type == 'Spectrogram':
-            linear_audios, diffusion_audios = [], []
-            for linear_feature, diffusion_feature, length in zip(
-                linear_predictions,
-                diffusion_predictions,
-                feature_lengths
-                ):
-                linear_feature = spectral_de_normalize_torch(linear_feature).cpu().numpy()
-                linear_audio = griffinlim(linear_feature)[:min(linear_feature.size(1), length) * self.hp.Sound.Frame_Shift]
-                linear_audio = (linear_audio / np.abs(linear_audio).max() * 32767.5).astype(np.int16)
-                linear_audios.append(linear_audio)
-                diffusion_feature = spectral_de_normalize_torch(diffusion_feature).cpu().numpy()
-                diffusion_audio = griffinlim(diffusion_feature)[:min(diffusion_feature, length) * self.hp.Sound.Frame_Shift]
-                diffusion_audio = (diffusion_audio / np.abs(diffusion_audio).max() * 32767.5).astype(np.int16)
-                diffusion_audios.append(diffusion_audio)
+        audio_lengths = [
+            length * self.hp.Sound.Frame_Shift
+            for length in feature_lengths
+            ]
 
         files = []
         for index in range(tokens.size(0)):
@@ -634,25 +588,39 @@ class Trainer:
         os.makedirs(os.path.join(self.hp.Inference_Path, 'Step-{}'.format(self.steps), 'PNG').replace('\\', '/'), exist_ok= True)
         os.makedirs(os.path.join(self.hp.Inference_Path, 'Step-{}'.format(self.steps), 'WAV').replace('\\', '/'), exist_ok= True)
         for index, (
-            linear_prediction, diffusion_prediction, duration,
-            log_f0, energy, token_length, feature_length,
-            text, decomposed_text, speaker, emotion, linear_audio, diffusion_audio, file
+            prediction,
+            duration,
+            log_f0,
+            energy,
+            token_length,
+            feature_length,
+            audio_length,
+            text,
+            decomposed_text,
+            speaker,
+            emotion,
+            file
             ) in enumerate(zip(
-            linear_predictions.cpu().numpy(), diffusion_predictions.cpu().numpy(), durations,
-            log_f0_predictions.cpu().numpy(), energy_predictions.cpu().numpy(), token_lengths.cpu().numpy(), feature_lengths,
-            texts, decomposed_texts, speaker_labels, emotion_labels, linear_audios, diffusion_audios, files
+            predictions.cpu().numpy(),
+            durations,
+            log_f0_predictions.cpu().numpy(),
+            energy_predictions.cpu().numpy(),
+            token_lengths.cpu().numpy(),
+            feature_lengths,
+            audio_lengths,
+            texts,
+            decomposed_texts,
+            speaker_labels,
+            emotion_labels,
+            files
             )):
             title = 'Text: {}    Speaker: {}    Emotion: {}'.format(text if len(text) < 90 else text[:90] + '…', speaker, emotion)
             new_figure = plt.figure(figsize=(20, 5 * 5), dpi=100)
-            ax = plt.subplot2grid((6, 1), (0, 0))
-            plt.imshow(linear_prediction[:, :feature_length], aspect='auto', origin='lower')
-            plt.title('Linear feature    {}'.format(title))
-            plt.colorbar(ax= ax)
-            ax = plt.subplot2grid((6, 1), (1, 0))
-            plt.imshow(diffusion_prediction[:, :feature_length], aspect='auto', origin='lower')
-            plt.title('Diffusion feature    {}'.format(title))
-            plt.colorbar(ax= ax)
-            ax = plt.subplot2grid((6, 1), (2, 0), rowspan= 2)
+            ax = plt.subplot2grid((5, 1), (0, 0))            
+            plt.plot(prediction[:audio_length])
+            plt.margins(x= 0)
+            plt.title('Audio Prediction    {}'.format(title))
+            ax = plt.subplot2grid((5, 1), (1, 0), rowspan= 2)
             plt.plot(duration[:feature_length])
             plt.title('Duration    {}'.format(title))
             plt.margins(x= 0)
@@ -661,8 +629,7 @@ class Trainer:
                 ['<S>'] + list(decomposed_text) + ['<E>'],
                 fontsize = 10
                 )
-            plt.colorbar(ax= ax)
-            ax = plt.subplot2grid((6, 1), (4, 0))
+            ax = plt.subplot2grid((5, 1), (3, 0))
             plt.plot(log_f0[:token_length])
             plt.title('Log F0    {}'.format(title))
             plt.margins(x= 0)
@@ -671,8 +638,7 @@ class Trainer:
                 ['<S>'] + list(decomposed_text) + ['<E>'],
                 fontsize = 10
                 )
-            plt.colorbar(ax= ax)
-            ax = plt.subplot2grid((6, 1), (5, 0))
+            ax = plt.subplot2grid((5, 1), (4, 0))
             plt.plot(energy[:token_length])
             plt.title('Energy    {}'.format(title))
             plt.margins(x= 0)
@@ -681,20 +647,14 @@ class Trainer:
                 ['<S>'] + list(decomposed_text) + ['<E>'],
                 fontsize = 10
                 )
-            plt.colorbar(ax= ax)
             plt.tight_layout()
             plt.savefig(os.path.join(self.hp.Inference_Path, 'Step-{}'.format(self.steps), 'PNG', '{}.png'.format(file)).replace('\\', '/'))
             plt.close(new_figure)
             
             wavfile.write(
-                os.path.join(self.hp.Inference_Path, 'Step-{}'.format(self.steps), 'WAV', '{}.Linear.wav'.format(file)).replace('\\', '/'),
+                os.path.join(self.hp.Inference_Path, 'Step-{}'.format(self.steps), 'WAV', '{}.wav'.format(file)).replace('\\', '/'),
                 self.hp.Sound.Sample_Rate,
-                linear_audio
-                )
-            wavfile.write(
-                os.path.join(self.hp.Inference_Path, 'Step-{}'.format(self.steps), 'WAV', '{}.Diffusion.wav'.format(file)).replace('\\', '/'),
-                self.hp.Sound.Sample_Rate,
-                diffusion_audio
+                prediction
                 )
             
     def Inference_Epoch(self):
@@ -733,8 +693,8 @@ class Trainer:
         state_dict = torch.load(path, map_location= 'cpu')
         self.model.load_state_dict(state_dict['Model'])
         self.optimizer.load_state_dict(state_dict['Optimizer'])
-        # self.scheduler.load_state_dict(state_dict['Scheduler'])
-        # self.steps = state_dict['Steps']
+        self.scheduler.load_state_dict(state_dict['Scheduler'])
+        self.steps = state_dict['Steps']
 
         logging.info('Checkpoint loaded at {} steps in GPU {}.'.format(self.steps, self.gpu_id))
 
@@ -791,7 +751,7 @@ class Trainer:
             except KeyboardInterrupt:
                 self.Save_Checkpoint()
                 exit(1)
-            
+
         self.tqdm.close()
         logging.info('Finished training.')
 

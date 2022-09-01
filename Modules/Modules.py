@@ -2,6 +2,7 @@ from argparse import Namespace
 import torch
 import numpy as np
 import math
+from numba import jit
 from typing import Optional, List, Dict, Tuple, Union
 
 from .Diffusion import Difussion
@@ -12,11 +13,6 @@ class VITS_Diff(torch.nn.Module):
     def __init__(self, hyper_parameters: Namespace):
         super().__init__()
         self.hp = hyper_parameters
-        
-        if self.hp.Feature_Type == 'Mel':
-            feature_size = self.hp.Sound.Mel_Dim
-        elif self.hp.Feature_Type == 'Spectrogram':
-            feature_size = self.hp.Sound.N_FFT // 2 + 1
         
         self.encoder = Encoder_LSTM(self.hp)
         
@@ -49,6 +45,7 @@ class VITS_Diff(torch.nn.Module):
         ge2es: torch.Tensor,
         emotions: torch.Tensor,
         features: torch.FloatTensor= None,
+        feature_lengths: torch.Tensor= None,
         log_f0s: torch.FloatTensor= None,
         energies: torch.FloatTensor= None,
         audios: torch.FloatTensor= None,
@@ -64,6 +61,7 @@ class VITS_Diff(torch.nn.Module):
                 ge2es= ge2es,
                 emotions= emotions,
                 features= features,
+                feature_lengths= feature_lengths,
                 log_f0s= log_f0s,
                 energies= energies,
                 audios= audios,
@@ -86,13 +84,14 @@ class VITS_Diff(torch.nn.Module):
         ge2es: torch.Tensor,
         emotions: torch.Tensor,
         features: torch.FloatTensor,
+        feature_lengths: torch.Tensor,
         log_f0s: torch.FloatTensor,
         energies: torch.FloatTensor,
         audios: torch.FloatTensor,
         ):
         encodings, means_p, log_stds_p, token_masks = self.encoder(tokens, token_lengths)   # [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t], [Batch, 1, Token_t]
         conditions = self.ge2e(ge2es) + self.emotion_embedding(emotions)    # [Batch, Enc_d]
-        posterior_encodings, means_q, log_stds_q, feature_masks = self.posterior_encoder(features, conditions)  # [Batch, Enc_d, Feature_t], [Batch, Enc_d, Feature_t], [Batch, Enc_d, Feature_t], [Batch, 1, Feature_t]
+        posterior_encodings, means_q, log_stds_q, feature_masks = self.posterior_encoder(features, feature_lengths, conditions)  # [Batch, Enc_d, Feature_t], [Batch, Enc_d, Feature_t], [Batch, Enc_d, Feature_t], [Batch, 1, Feature_t]
         posterior_encodings_p = self.flow(posterior_encodings, conditions, feature_masks)   # [Batch, Enc_d, Feature_t]
 
         with torch.no_grad():
@@ -105,29 +104,34 @@ class VITS_Diff(torch.nn.Module):
             neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4    # [Batch, Feature_t, Token_t]
 
             attention_masks = token_masks * feature_masks.permute(0, 2, 1)  # [Batch, 1, Token_t] x [Batch, Feature_t, 1] -> [Batch, Feature_t, Token_t]
-            attentions = self.maximum_path_generater(neg_cent.permute(0, 2, 1), attention_masks.permute(0, 2, 1)).permute(0, 2, 1)  # [Batch, Feature_t, Token_t]
-        
-        durations = attentions.sum(dim= 1)  # [Batch, Token_t]
-        
+            attentions = self.maximum_path_generater(neg_cent.permute(0, 2, 1), attention_masks.permute(0, 2, 1)).permute(0, 2, 1).to(neg_cent.device)  # [Batch, Feature_t, Token_t]
+  
+        duration_targets = attentions.sum(dim= 1).long()    # [Batch, Token_t]
+        log_f0_targets = (log_f0s.unsqueeze(1) @ attentions).squeeze(1) # [Batch, Token_t]
+        energy_targets = (energies.unsqueeze(1) @ attentions).squeeze(1)    # [Batch, Token_t]
+
         means_p, log_stds_p, log_duration_predictions, log_f0_predictions, energy_predictions = self.variance_predictor_block(
             encodings= encodings,
             means_p= means_p,
             log_std_p= log_stds_p,
             encoding_masks= token_masks,
-            durations= durations,
-            log_f0s= log_f0s,
-            energies= energies,
+            durations= duration_targets,
+            log_f0s= log_f0_targets,
+            energies= energy_targets,
             )   # [Batch, Enc_d, Feature_t]
 
-        diffusion_predictions, noises, epsilons = self.diffusion(
+        predictions, noises, epsilons = self.diffusion(
             encodings= posterior_encodings,
             audios= audios
             )
 
         '''
-        diffusion_predictions: None
+        predictions: None
         noises: [Batch, Audio_t]
         epsilons: [Batch, Audio_t]
+        durations_targets: [Batch, Token_t]
+        log_f0_targets: [Batch, Token_t]
+        energy_targets: [Batch, Token_t]
         log_duration_predictions: [Batch, Token_t]
         log_f0_predictions: [Batch, Token_t]
         energy_predictions: [Batch, Token_t]
@@ -141,11 +145,12 @@ class VITS_Diff(torch.nn.Module):
         '''
 
         return \
-            diffusion_predictions, noises, epsilons, \
+            predictions, noises, epsilons, \
+            duration_targets, log_f0_targets, energy_targets, \
             log_duration_predictions, log_f0_predictions, energy_predictions, \
             encodings, means_p, log_stds_p, \
             posterior_encodings, means_q, log_stds_q, \
-            posterior_encodings_p,
+            posterior_encodings_p
 
     def Inference(
         self,
@@ -166,26 +171,33 @@ class VITS_Diff(torch.nn.Module):
         conditions = self.ge2e(ge2es) + self.emotion_embedding(emotions)    # [Batch, Enc_d]
         
         means_p, log_stds_p, log_duration_predictions, log_f0_predictions, energy_predictions = self.variance_predictor_block(
+            encodings= encodings,
             means_p= means_p,
             log_std_p= log_stds_p,
-            encoding_masks= token_masks
+            encoding_masks= token_masks,
+            length_scales= length_scales,
+            log_f0_scales= log_f0_scales,
+            energy_scales= energy_scales,
             )   # [Batch, Enc_d, Feature_t], [Batch, Enc_d, Feature_t], [Batch, Token_t], [Batch, Token_t], [Batch, Token_t]
 
-        feature_masks = ~Mask_Generate(
-            lengths= ((torch.exp(log_duration_predictions[:, :-1]) - 1).ceil().clip(3, 50) * length_scales).long().sum(dim= 1)
-            ).unsqueeze(1).float()  # [Batch, 1, Feature_t]
+        feature_masks = (~Mask_Generate(
+            lengths= ((torch.exp(log_duration_predictions) - 1).ceil().clip(0, 50) * length_scales).long().sum(dim= 1)
+            )).unsqueeze(1).float()  # [Batch, 1, Feature_t]
 
         posterior_encodings_p = means_p + torch.randn_like(means_p) * torch.exp(log_stds_p) * noise_scales  # [Batch, Enc_d, Feature_t]
         posterior_encodings = self.flow(posterior_encodings_p, conditions, feature_masks, reverse= True)   # [Batch, Enc_d, Feature_t]
 
-        diffusion_predictions, noises, epsilons = self.diffusion(
+        predictions, noises, epsilons = self.diffusion(
             encodings= posterior_encodings
             )   # [Batch, Audio_t], None, None
 
         '''
-        diffusion_predictions: [Batch, Audio_t]
+        predictions: [Batch, Audio_t]
         noises: None
         epsilons: None
+        durations_targets: None
+        log_f0_targets: None
+        energy_targets: None
         log_duration_predictions: [Batch, Token_t]
         log_f0_predictions: [Batch, Token_t]
         energy_predictions: [Batch, Token_t]
@@ -199,13 +211,12 @@ class VITS_Diff(torch.nn.Module):
         '''
 
         return \
-            diffusion_predictions, noises, epsilons, \
+            predictions, noises, epsilons, \
+            None, None, None, \
             log_duration_predictions, log_f0_predictions, energy_predictions, \
             encodings, means_p, log_stds_p, \
             posterior_encodings, None, None, \
-            posterior_encodings_p,
-
-
+            posterior_encodings_p, None
 
     def Scale_to_Tensor(
         self,
@@ -429,7 +440,8 @@ class WaveNet(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        condtions: torch.Tensor
+        condtions: torch.Tensor,
+        masks: torch.Tensor
         ) -> torch.Tensor:
         condition_stacks = self.condition(condtions)    # [Stack, Batch, Dim * 2, 1]
 
@@ -443,9 +455,9 @@ class WaveNet(torch.nn.Module):
             
             skips_list.append(skip_block(x_ins))
             if index < len(self.in_blocks) - 1:
-                x = (x + residual_block(x_ins))
+                x = (x + residual_block(x_ins)) * masks
             
-        return torch.stack(skips_list, dim= 1).sum(dim= 1)
+        return torch.stack(skips_list, dim= 1).sum(dim= 1) * masks
 
 class Gated_Activation(torch.nn.Module): 
     def forward(
@@ -564,7 +576,7 @@ class Variance_Predictor_Block(torch.nn.Module):
         '''                
         log_duration_predictions = self.duration_predictor(encodings).squeeze(1)   # [Batch, Enc_t]
         if durations is None:
-            durations = ((torch.exp(log_duration_predictions) - 1).ceil().clip(3, 50) * length_scales).long()
+            durations = ((torch.exp(log_duration_predictions) - 1).ceil().clip(0, 50) * length_scales).long()
             durations[:, -1] += durations.sum(dim= 1).max() - durations.sum(dim= 1) # Align the sum of lengths
 
         log_f0_predictions = self.log_f0_predictor(encodings)   # [Batch, 1, Enc_t]
@@ -737,6 +749,12 @@ class Length_Regulator(torch.nn.Module):
         encodings= torch.Tensor,
         durations= torch.Tensor
         ):
+        durations = torch.cat([
+            durations,
+            durations.sum(dim= 1).max() - durations.sum(dim= 1, keepdim= True)
+            ], dim= 1)
+        encodings = torch.cat([encodings, torch.zeros_like(encodings[:, :, -1:])], dim= 2)
+
         return torch.stack([
             encoding.repeat_interleave(duration, dim= 1)
             for encoding, duration in zip(encodings, durations)
@@ -840,3 +858,10 @@ def Mask_Generate(lengths: torch.Tensor, max_length: int= None):
     max_length = max_length or torch.max(lengths)
     sequence = torch.arange(max_length)[None, :].to(lengths.device)
     return sequence >= lengths[:, None]    # [Batch, Time]
+
+
+def KL_Loss(posterior_encodings_p, log_stds_q, means_p, log_stds_p, feature_masks):
+    losses = log_stds_p - log_stds_q - 0.5 + 0.5 * (posterior_encodings_p - means_p).pow(2.0) * (-2.0 * log_stds_p).exp()
+    losses = (losses * feature_masks).sum() / feature_masks.sum()
+
+    return losses
