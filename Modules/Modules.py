@@ -14,7 +14,7 @@ class VITS_Diff(torch.nn.Module):
         super().__init__()
         self.hp = hyper_parameters
         
-        self.encoder = Encoder_LSTM(self.hp)
+        self.encoder = Encoder(self.hp)
         
         self.emotion_embedding = torch.nn.Embedding(
             num_embeddings= self.hp.Emotions,
@@ -253,7 +253,7 @@ class VITS_Diff(torch.nn.Module):
 
         return scale.to(tokens.device)
 
-class Encoder_LSTM(torch.nn.Module): 
+class Encoder(torch.nn.Module): 
     def __init__(self, hyper_parameters: Namespace):
         super().__init__()
         self.hp = hyper_parameters
@@ -317,7 +317,7 @@ class Encoder_LSTM(torch.nn.Module):
         tokens = torch.nn.utils.rnn.pad_packed_sequence(
             sequence= tokens,
             total_length= unpacked_length
-            )[0].permute(1, 2, 0)   # [Batch, Dim, Time]
+            )[0].permute(1, 2, 0) * masks   # [Batch, Dim, Time]
 
         tokens = self.lstm_dropout(tokens)
         means, log_stds = (self.projection(tokens) * masks).chunk(chunks= 2, dim= 1)
@@ -594,8 +594,8 @@ class Variance_Predictor_Block(torch.nn.Module):
             durations = ((torch.exp(log_duration_predictions) - 1).ceil().clip(0, 50) * length_scales).long()
             durations[:, -1] += durations.sum(dim= 1).max() - durations.sum(dim= 1) # Align the sum of lengths
 
-        log_f0_predictions = self.log_f0_predictor(encodings)   # [Batch, 1, Enc_t]
-        energy_predictions = self.energy_predictor(encodings)   # [Batch, 1, Enc_t]
+        log_f0_predictions = self.log_f0_predictor(encodings).masked_fill(~encoding_masks.bool(), -5.0)   # [Batch, 1, Enc_t]
+        energy_predictions = self.energy_predictor(encodings).masked_fill(~encoding_masks.bool(), -1.5)   # [Batch, 1, Enc_t]
 
         log_f0s = log_f0s.unsqueeze(1) if not log_f0s is None else (log_f0_predictions + log_f0_scales.unsqueeze(1) * (log_f0_predictions > -5.0)).clip(-5.0, torch.inf)
         energies = energies.unsqueeze(1) if not energies is None else (energy_predictions + energy_scales.unsqueeze(1)).clip(-1.5, torch.inf)
