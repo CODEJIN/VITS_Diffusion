@@ -588,7 +588,6 @@ class Variance_Predictor_Block(torch.nn.Module):
         encodings: [Batch, Enc_d, Enc_t]
         durations: [Batch, Enc_t]
         '''                
-        encodings = encodings.detach()
         log_duration_predictions = self.duration_predictor(encodings).squeeze(1)   # [Batch, Enc_t]
         if durations is None:
             durations = ((torch.exp(log_duration_predictions) - 1).ceil().clip(0, 50) * length_scales).long()

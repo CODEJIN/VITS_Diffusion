@@ -359,7 +359,7 @@ class Upsampler(torch.nn.Sequential):
         super().__init__()
         self.hp = hyper_parameters
 
-        assert math.prod(self.hp.Diffusion.Upsampler.Stride) == self.hp.Sound.Frame_Shift
+        # assert math.prod(self.hp.Diffusion.Upsampler.Stride) == self.hp.Sound.Frame_Shift # Python 3.6 does not support.
 
         for index, stride in enumerate(self.hp.Diffusion.Upsampler.Stride):
             self.add_module(f'ConvTranspose_{index}', ConvTranspose1d(                
