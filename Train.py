@@ -386,6 +386,7 @@ class Trainer:
             log_duration_predictions,
             (duration_targets.float() + 1).log()
             ) * ~token_masks).mean()
+
         loss_dict['Log_F0'] = (self.criterion_dict['MSE'](
             log_f0_predictions,
             log_f0_targets

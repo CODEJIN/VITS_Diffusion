@@ -122,7 +122,7 @@ Train:
         Beta1: 0.9
         Beta2: 0.999
         Epsilon: 1.0e-7
-    ASR_Lambda: 0.01
+    Segment_Size: 32    # Feature based
     Weight_Decay: 1.0e-6
     Gradient_Norm: 1.0
     Max_Step: 1000000

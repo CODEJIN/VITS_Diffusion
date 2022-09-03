@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Tuple, Union
 
 from .Diffusion import Difussion
 from .Layer import Linear, Conv1d, Lambda
-from SSML import Scale_Type
+from .monotonic_align import maximum_path
 
 class VITS_Diff(torch.nn.Module):
     def __init__(self, hyper_parameters: Namespace):
@@ -31,12 +31,12 @@ class VITS_Diff(torch.nn.Module):
 
         self.variance_predictor_block = Variance_Predictor_Block(self.hp)
 
-        self.maximum_path_generater = Maximum_Path_Generater()
-
         self.posterior_encoder = Posterior_Encoder(self.hp)
         self.flow = Flow(self.hp)
 
         self.diffusion = Difussion(self.hp)
+
+        self.segment = Segment()
 
     def forward(
         self,
@@ -104,11 +104,13 @@ class VITS_Diff(torch.nn.Module):
             neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4    # [Batch, Feature_t, Token_t]
 
             attention_masks = token_masks * feature_masks.permute(0, 2, 1)  # [Batch, 1, Token_t] x [Batch, Feature_t, 1] -> [Batch, Feature_t, Token_t]
-            attentions = self.maximum_path_generater(neg_cent.permute(0, 2, 1), attention_masks.permute(0, 2, 1)).permute(0, 2, 1).to(neg_cent.device)  # [Batch, Feature_t, Token_t]
+            attentions = maximum_path(neg_cent, attention_masks).detach()
   
         duration_targets = attentions.sum(dim= 1).long()    # [Batch, Token_t]
-        log_f0_targets = (log_f0s.unsqueeze(1) @ attentions).squeeze(1) # [Batch, Token_t]
-        energy_targets = (energies.unsqueeze(1) @ attentions).squeeze(1)    # [Batch, Token_t]
+        log_f0_targets = (log_f0s.unsqueeze(1) @ attentions).squeeze(1) / duration_targets     # [Batch, Token_t]
+        energy_targets = (energies.unsqueeze(1) @ attentions).squeeze(1) / duration_targets    # [Batch, Token_t]
+        log_f0_targets = log_f0_targets.nan_to_num(-5.0)    # zero duration fix
+        energy_targets = energy_targets.nan_to_num(-1.5)    # zero duration fix
 
         means_p, log_stds_p, log_duration_predictions, log_f0_predictions, energy_predictions = self.variance_predictor_block(
             encodings= encodings,
@@ -120,9 +122,21 @@ class VITS_Diff(torch.nn.Module):
             energies= energy_targets,
             )   # [Batch, Enc_d, Feature_t]
 
+        posterior_encodings_slice, offsets = self.segment(
+            patterns= posterior_encodings.permute(0, 2, 1),
+            segment_size= self.hp.Train.Segment_Size,
+            lengths= feature_lengths
+            )
+        posterior_encodings_slice = posterior_encodings_slice.permute(0, 2, 1)
+        audios_slice, _ = self.segment(
+            patterns= audios,
+            segment_size= self.hp.Train.Segment_Size * self.hp.Sound.Frame_Shift,
+            offsets= offsets * self.hp.Sound.Frame_Shift
+            )
+
         predictions, noises, epsilons = self.diffusion(
-            encodings= posterior_encodings,
-            audios= audios
+            encodings= posterior_encodings_slice,
+            audios= audios_slice
             )
 
         '''
@@ -574,6 +588,7 @@ class Variance_Predictor_Block(torch.nn.Module):
         encodings: [Batch, Enc_d, Enc_t]
         durations: [Batch, Enc_t]
         '''                
+        encodings = encodings.detach()
         log_duration_predictions = self.duration_predictor(encodings).squeeze(1)   # [Batch, Enc_t]
         if durations is None:
             durations = ((torch.exp(log_duration_predictions) - 1).ceil().clip(0, 50) * length_scales).long()
@@ -583,12 +598,12 @@ class Variance_Predictor_Block(torch.nn.Module):
         energy_predictions = self.energy_predictor(encodings)   # [Batch, 1, Enc_t]
 
         log_f0s = log_f0s.unsqueeze(1) if not log_f0s is None else (log_f0_predictions + log_f0_scales.unsqueeze(1) * (log_f0_predictions > -5.0)).clip(-5.0, torch.inf)
-        energies = energies.unsqueeze(1) if not energies is None else energy_predictions + energy_scales.unsqueeze(1)
+        energies = energies.unsqueeze(1) if not energies is None else (energy_predictions + energy_scales.unsqueeze(1)).clip(-1.5, torch.inf)
 
         log_f0s = self.log_f0_embedding(log_f0s) * encoding_masks
         energies = self.energy_embedding(energies) * encoding_masks
 
-        means_p = encodings + log_f0s + energies
+        means_p = means_p + log_f0s + energies
 
         means_p = self.length_regulator(
             encodings= means_p,
@@ -600,91 +615,6 @@ class Variance_Predictor_Block(torch.nn.Module):
             )
         
         return means_p, log_std_p, log_duration_predictions, log_f0_predictions.squeeze(1), energy_predictions.squeeze(1)
-
-    def SSML(
-        self,
-        encodings: torch.Tensor,
-        encoding_lengths: torch.Tensor,
-        length_scales: List[List[Tuple[Scale_Type, float]]],
-        log_f0_scales: List[List[Tuple[Scale_Type, float]]],
-        energy_scales: List[List[Tuple[Scale_Type, float]]],
-        ):
-        log_duration_predictions = self.duration_predictor(encodings).squeeze(1)   # [Batch, 1, Enc_t]        
-        durations = (torch.exp(log_duration_predictions) - 1).ceil().clip(3, math.inf).long()
-
-        new_durations = []
-        for duration, length_scale in zip(durations, length_scales):            
-            new_duration = []
-            length_scale.extend([(Scale_Type.Multiply, 1.0)] * (duration.size(0) - len(length_scale)))
-            for duration_value, (scale_type, scale) in zip(duration, length_scale):
-                if scale_type == Scale_Type.Replace:
-                    new_duration.append(torch.tensor(scale).long().to(encodings.device))
-                elif scale_type == Scale_Type.Multiply:                    
-                    new_duration.append((duration_value * scale).long())
-                elif scale_type == Scale_Type.Add:
-                    new_duration.append((duration_value + scale).long())
-                elif scale_type == Scale_Type.Max:
-                    new_duration.append(duration_value.clamp(max= scale).long())
-                elif scale_type == Scale_Type.Min:
-                    new_duration.append(duration_value.clamp(min= scale).long())
-            new_durations.append(torch.stack(new_duration, dim= 0))
-
-        durations = torch.stack(new_durations, dim= 0)
-        durations[:, -1] += durations.sum(dim= 1).max() - durations.sum(dim= 1) # Align the sum of lengths
-
-        log_f0s = self.log_f0_predictor(encodings).squeeze(1)   # [Batch, Enc_t]
-        new_log_f0s = []
-        for log_f0, log_f0_scale in zip(log_f0s, log_f0_scales):
-            new_log_f0 = []
-            log_f0_scale.extend([(Scale_Type.Add, 0.0)] * (log_f0.size(0) - len(log_f0_scale)))
-            for log_f0_value, (scale_type, scale) in zip(log_f0, log_f0_scale):
-                if scale_type == Scale_Type.Replace:
-                    new_log_f0.append(torch.tensor(scale).float().to(log_f0_value.device))
-                elif scale_type == Scale_Type.Multiply:
-                    new_log_f0.append(log_f0_value * scale)
-                elif scale_type == Scale_Type.Add:
-                    new_log_f0.append(log_f0_value + scale)
-                elif scale_type == Scale_Type.Max:
-                    new_log_f0.append(log_f0_value.clamp(max= scale))
-                elif scale_type == Scale_Type.Min:
-                    new_log_f0.append(log_f0_value.clamp(min= scale))
-            new_log_f0s.append(torch.stack(new_log_f0, dim= 0))
-        log_f0s = torch.stack(new_log_f0s, dim= 0)
-        
-        energies = self.energy_predictor(encodings).squeeze(1)   # [Batch, Enc_t]
-        new_energies = []
-        for energy, energy_scale in zip(energies, energy_scales):
-            new_energy = []
-            energy_scale.extend([(Scale_Type.Add, 0.0)] * (energy.size(0) - len(energy_scale)))
-            for energy_value, (scale_type, scale) in zip(energy, energy_scale):
-                if scale_type == Scale_Type.Replace:
-                    new_energy.append(torch.tensor(scale).float().to(energy_value.device))
-                elif scale_type == Scale_Type.Multiply:
-                    new_energy.append((energy_value * scale).float())
-                elif scale_type == Scale_Type.Add:
-                    new_energy.append((energy_value + scale).float())
-                elif scale_type == Scale_Type.Max:
-                    new_energy.append(energy_value.clamp(max= scale).float())
-                elif scale_type == Scale_Type.Min:
-                    new_energy.append(energy_value.clamp(min= scale).float())
-            new_energies.append(torch.stack(new_energy, dim= 0))
-        energies = torch.stack(new_energies, dim= 0)
-
-        encoding_masks = Mask_Generate(
-            lengths= encoding_lengths,
-            max_length= encodings.size(2)
-            ).unsqueeze(1).to(encodings.device)
-        log_f0s = self.log_f0_embedding(log_f0s.unsqueeze(1)).masked_fill(encoding_masks, 0.0)
-        energies = self.energy_embedding(energies.unsqueeze(1)).masked_fill(encoding_masks, 0.0)
-
-        encodings = encodings + log_f0s + energies
-
-        encodings = self.length_regulator(
-            encodings= encodings,
-            durations= durations
-            )
-
-        return encodings, durations, log_f0s, energies  # In SSML return normal duration, not log duration.
 
 class Variance_Predictor(torch.nn.Sequential): 
     def __init__(
@@ -760,56 +690,27 @@ class Length_Regulator(torch.nn.Module):
             for encoding, duration in zip(encodings, durations)
             ], dim= 0)
 
-class Maximum_Path_Generater(torch.nn.Module):
-    def forward(self, log_p, mask):
+class Segment(torch.nn.Module):
+    def forward(
+        self,
+        patterns: torch.Tensor,
+        segment_size: int,
+        lengths: torch.Tensor= None,
+        offsets: torch.Tensor= None
+        ):
         '''
-        x: [Batch, Token_t, Mel_t]
-        mask: [Batch, Token_t, Mel_t]
+        patterns: [Batch, Time, ...]
+        lengths: [Batch]
+        segment_size: an integer scalar    
         '''
-        log_p *= mask
-        device, dtype = log_p.device, log_p.dtype
-        log_p = log_p.data.cpu().numpy().astype(np.float32)
-        mask = mask.data.cpu().numpy()
-
-        token_lengths = mask.sum(axis= 1)[:, 0].astype('int32')   # [Batch]
-        feature_lengths = mask.sum(axis= 2)[:, 0].astype('int32')   # [Batch]
-
-        paths = self.calc_paths(log_p, token_lengths, feature_lengths)
-
-        return torch.from_numpy(paths).to(device= device, dtype= dtype)
-
-    def calc_paths(self, log_p, token_lengths, feature_lengths):
-        return np.stack([
-            Maximum_Path_Generater.calc_path(x, token_length, feature_length)
-            for x, token_length, feature_length in zip(log_p, token_lengths, feature_lengths)
-            ], axis= 0)
-
-    @staticmethod
-    @jit(nopython=True)
-    def calc_path(x, token_length, feature_length):
-        path = np.zeros_like(x, dtype= np.int32)
-        for feature_index in range(feature_length):
-            for token_index in range(max(0, token_length + feature_index - feature_length), min(token_length, feature_index + 1)):
-                if feature_index == token_index:
-                    current_q = -1e+7
-                else:
-                    current_q = x[token_index, feature_index - 1]   # Stayed current token
-                if token_index == 0:
-                    if feature_index == 0:
-                        prev_q = 0.0
-                    else:
-                        prev_q = -1e+7
-                else:
-                    prev_q = x[token_index - 1, feature_index - 1]  # Moved to next token
-            x[token_index, feature_index] = max(current_q, prev_q) + x[token_index, feature_index]
-
-        token_index = token_length - 1
-        for feature_index in range(feature_length - 1, -1, -1):
-            path[token_index, feature_index] = 1
-            if token_index == feature_index or x[token_index, feature_index - 1] < x[token_index - 1, feature_index - 1]:
-                token_index = max(0, token_index - 1)
-
-        return path
+        if offsets is None:
+            offsets = (torch.rand_like(patterns[:, 0, 0]) * (lengths - segment_size)).long()
+        segments = torch.stack([
+            pattern[offset:offset + segment_size]
+            for pattern, offset in zip(patterns, offsets)
+            ], dim= 0)
+        
+        return segments, offsets
 
 
 # https://pytorch.org/tutorials/beginner/transformer_tutorial.html
