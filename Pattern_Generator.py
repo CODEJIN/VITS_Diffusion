@@ -12,7 +12,7 @@ from Arg_Parser import Recursive_Parse
 
 using_Extension = [x.upper() for x in ['.wav', '.m4a', '.flac']]
 regex_Checker = re.compile('[가-힣A-Z,.?!\'\-\s]+')
-top_db_dict = {'KSS': 35, 'Emotion': 30, 'AIHub': 30, 'Seoul': 20, 'YUA': 40, 'JPS': 40, 'LostArk': 40, 'VCTK': 15, 'Libri': 23}
+top_db_dict = {'KSS': 35, 'Emotion': 30, 'AIHub': 30, 'VCTK': 15, 'Libri': 23}
 
 def Text_Filtering(text):
     remove_Letter_List = ['(', ')', '\"', '[', ']', ':', ';']
@@ -304,6 +304,75 @@ def KSS_Info_Load(path):
 
     print('KSS info generated: {}'.format(len(paths)))
     return paths, text_dict, decomposed_dict, speaker_dict, emotion_dict, language_dict, gender_dict
+
+def AIHub_Info_Load(path):
+    emotion_label_dict = {
+        'Neutrality': 'Neutral'
+        }
+
+    skip_info_keys = []
+    info_dict = {}
+    for root, _, files in os.walk(path):
+        for file in files:
+            key, extension = os.path.splitext(file)
+            if not key in info_dict.keys():
+                info_dict[key] = {}
+            
+            path = os.path.join(root, file).replace('\\', '/')
+            if extension.upper() == '.WAV':
+                info_dict[key]['Path'] = path
+            elif extension.upper() == '.JSON':
+                pattern_info = json.load(open(path, encoding= 'utf-8-sig'))
+                text = Text_Filtering(pattern_info['전사정보']['TransLabelText'].replace('/xa0', ' '))
+                if text is None:
+                    skip_info_keys.append(key)
+                    continue
+
+                info_dict[key]['Text'] = text
+                decomposed = []
+                for letter in text:
+                    if not hgtk.checker.is_hangul(letter):
+                        decomposed.append(letter)
+                        continue
+
+                    onset, nucleus, coda = hgtk.letter.decompose(letter)
+                    coda += '_'
+                    decomposed.extend([onset, nucleus, coda])
+                
+                info_dict[key]['Decomposed'] = decomposed
+                info_dict[key]['Speaker'] = 'AIHub_{}'.format(pattern_info['화자정보']['SpeakerName'])
+                info_dict[key]['Gender'] = pattern_info['화자정보']['Gender']
+                info_dict[key]['Emotion'] = emotion_label_dict[pattern_info['화자정보']['Emotion']]
+            else:
+                raise ValueError(f'Unsupported file type: {path}')
+
+    for key in skip_info_keys:
+        info_dict.pop(key, None)
+    
+    paths = [info['Path'] for info in info_dict.values()]
+    text_dict = {
+        info['Path']: info['Text']  for info in info_dict.values()
+        }
+    decomposed_dict = {
+        info['Path']: info['Decomposed']  for info in info_dict.values()
+        }
+    speaker_dict = {
+        info['Path']: info['Speaker']  for info in info_dict.values()
+        }
+    emotion_dict = {
+        info['Path']: info['Emotion']  for info in info_dict.values()
+        }
+    language_dict = {
+        path: 'Korean'
+        for path in paths
+        }
+    gender_dict = {
+        info['Path']: info['Gender']  for info in info_dict.values()
+        }
+
+    print('AIHub info generated: {}'.format(len(paths)))
+    return paths, text_dict, decomposed_dict, speaker_dict, emotion_dict, language_dict, gender_dict
+
 
 
 def Basic_Info_Load(path, dataset_label, language= None, gender= None):
@@ -799,20 +868,7 @@ if __name__ == '__main__':
     argParser.add_argument("-hp", "--hyper_parameters", required=True, type= str)
     argParser.add_argument("-emo", "--emotion_path", required=False)
     argParser.add_argument("-kss", "--kss_path", required=False)
-    argParser.add_argument("-yua", "--yua_path", required=False)
-    argParser.add_argument("-jps", "--jps_path", required=False)
-    argParser.add_argument("-selectstar", "--selectstar_path", required=False)
-    argParser.add_argument("-mediazen", "--mediazen_path", required=False)
-    argParser.add_argument("-lostark", "--lostark_path", required=False)
-    argParser.add_argument("-sea", "--sea_path", required=False)
-    argParser.add_argument("-epic7", "--epic7_path", required=False)
-    argParser.add_argument("-sghvc", "--sghvc_path", required=False)
-    argParser.add_argument("-gp", "--gp_path", required=False)
-    argParser.add_argument("-youtube", "--youtube_path", required=False)
-    argParser.add_argument("-gcp", "--gcp_path", required=False)
-    argParser.add_argument("-clova", "--clova_path", required=False)
-    argParser.add_argument("-maum", "--maum_path", required=False)
-    argParser.add_argument("-vd", "--voice_drama_path", required=False)
+    argParser.add_argument("-aihub", "--aihub_path", required=False)
 
     argParser.add_argument("-vctk", "--vctk_path", required=False)
     argParser.add_argument("-libri", "--libri_path", required=False)
@@ -868,456 +924,22 @@ if __name__ == '__main__':
         dataset_dict.update({path: 'KSS' for paths in kss_paths for path in paths})
         tag_dict.update({path: '' for paths in kss_paths for path in paths})
 
-    if not args.yua_path is None:
-        yua_paths, yua_text_dict, yua_decomposed_dict, yua_speaker_dict, yua_emotion_dict, yua_language_dict, yua_gender_dict = Basic_Info_Load(
-            path= args.yua_path,
-            dataset_label= 'YUA',
-            language= 'Korean',
-            gender= 'Female'
-            )        
-        yua_paths = Split_Eval(yua_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(yua_paths[0])
-        eval_paths.extend(yua_paths[1])
-        text_dict.update(yua_text_dict)
-        decomposed_dict.update(yua_decomposed_dict)
-        speaker_dict.update(yua_speaker_dict)
-        emotion_dict.update(yua_emotion_dict)
-        language_dict.update(yua_language_dict)
-        gender_dict.update(yua_gender_dict)
-        dataset_dict.update({path: 'YUA' for paths in yua_paths for path in paths})
-        tag_dict.update({path: '' for paths in yua_paths for path in paths})
-    
-    if not args.jps_path is None:
-        jps_paths, jps_text_dict, jps_decomposed_dict, jps_speaker_dict, jps_emotion_dict, jps_language_dict, jps_gender_dict = Basic_Info_Load(
-            path= args.jps_path,
-            dataset_label= 'JPS',
-            language= 'Korean',
-            gender= 'Female'
+    if not args.aihub_path is None:
+        aihub_paths, aihub_text_dict, aihub_decomposed_dict, aihub_speaker_dict, aihub_emotion_dict, aihub_language_dict, aihub_gender_dict = AIHub_Info_Load(
+            path= args.aihub_path
             )
-        jps_paths = Split_Eval(jps_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(jps_paths[0])
-        eval_paths.extend(jps_paths[1])
-        text_dict.update(jps_text_dict)
-        decomposed_dict.update(jps_decomposed_dict)
-        speaker_dict.update(jps_speaker_dict)
-        emotion_dict.update(jps_emotion_dict)
-        language_dict.update(jps_language_dict)
-        gender_dict.update(jps_gender_dict)
-        dataset_dict.update({path: 'JPS' for paths in jps_paths for path in paths})
-        tag_dict.update({path: '' for paths in jps_paths for path in paths})
+        aihub_paths = Split_Eval(aihub_paths, args.eval_ratio, args.eval_min)
+        train_paths.extend(aihub_paths[0])
+        eval_paths.extend(aihub_paths[1])
+        text_dict.update(aihub_text_dict)
+        decomposed_dict.update(aihub_decomposed_dict)
+        speaker_dict.update(aihub_speaker_dict)
+        emotion_dict.update(aihub_emotion_dict)
+        language_dict.update(aihub_language_dict)
+        gender_dict.update(aihub_gender_dict)
+        dataset_dict.update({path: 'AIHub' for paths in aihub_paths for path in paths})
+        tag_dict.update({path: '' for paths in aihub_paths for path in paths})
 
-    if not args.selectstar_path is None:
-        selectstar_paths, selectstar_text_dict, selectstar_decomposed_dict, selectstar_speaker_dict, selectstar_emotion_dict, selectstar_language_dict, selectstar_gender_dict = Basic_Info_Load(
-            path= args.selectstar_path,
-            dataset_label= 'SelectStar',
-            language= 'Korean',
-            gender= {
-                'SelectStar_Female_01': 'Female',
-                'SelectStar_Female_02': 'Female',
-                'SelectStar_Female_03': 'Female',
-                'SelectStar_Male_01': 'Male',
-                'SelectStar_Male_02': 'Male',
-                'SelectStar_Male_03': 'Male',
-                'SelectStar_CJY': 'Female',
-                'SelectStar_DH': 'Female',
-                'SelectStar_KDH': 'Female',
-                'SelectStar_KEY': 'Female',
-                'SelectStar_KSH': 'Female',
-                'SelectStar_KSW': 'Female',
-                'SelectStar_LHW': 'Female',
-                'SelectStar_LJA': 'Female',
-                'SelectStar_SBL': 'Female',
-                'SelectStar_SYW': 'Female',
-                },
-            )
-        selectstar_paths = Split_Eval(selectstar_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(selectstar_paths[0])
-        eval_paths.extend(selectstar_paths[1])
-        text_dict.update(selectstar_text_dict)
-        decomposed_dict.update(selectstar_decomposed_dict)
-        speaker_dict.update(selectstar_speaker_dict)
-        emotion_dict.update(selectstar_emotion_dict)
-        language_dict.update(selectstar_language_dict)
-        gender_dict.update(selectstar_gender_dict)
-        dataset_dict.update({path: 'SelectStar' for paths in selectstar_paths for path in paths})
-        tag_dict.update({path: '' for paths in selectstar_paths for path in paths})
-
-    if not args.mediazen_path is None:
-        mediazen_paths, mediazen_text_dict, mediazen_decomposed_dict, mediazen_speaker_dict, mediazen_emotion_dict, mediazen_language_dict, mediazen_gender_dict = Basic_Info_Load(
-            path= args.mediazen_path,
-            dataset_label= 'Mediazen',
-            language= 'Korean',
-            gender= {
-                'Mediazen_KJE': 'Female',
-                },
-            )
-        mediazen_paths = Split_Eval(mediazen_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(mediazen_paths[0])
-        eval_paths.extend(mediazen_paths[1])
-        text_dict.update(mediazen_text_dict)
-        decomposed_dict.update(mediazen_decomposed_dict)
-        speaker_dict.update(mediazen_speaker_dict)
-        emotion_dict.update(mediazen_emotion_dict)
-        language_dict.update(mediazen_language_dict)
-        gender_dict.update(mediazen_gender_dict)
-        dataset_dict.update({path: 'Mediazen' for paths in mediazen_paths for path in paths})
-        tag_dict.update({path: '' for paths in mediazen_paths for path in paths})
-
-    if not args.lostark_path is None:
-        lostark_paths, lostark_text_dict, lostark_decomposed_dict, lostark_speaker_dict, lostark_emotion_dict, lostark_language_dict, lostark_gender_dict = Basic_Info_Load(
-            path= args.lostark_path,
-            dataset_label= 'LostArk',
-            language= 'Korean',
-            gender= {
-                'Sillian': 'Male',
-                'Aman': 'Male',
-                'Aman_Delain': 'Male',
-                'Nia': 'Female',
-                'Ninave': 'Female',
-                },
-            )
-        lostark_paths = Split_Eval(lostark_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(lostark_paths[0])
-        eval_paths.extend(lostark_paths[1])
-        text_dict.update(lostark_text_dict)
-        decomposed_dict.update(lostark_decomposed_dict)
-        speaker_dict.update(lostark_speaker_dict)
-        emotion_dict.update(lostark_emotion_dict)
-        language_dict.update(lostark_language_dict)
-        gender_dict.update(lostark_gender_dict)
-        dataset_dict.update({path: 'LostArk' for paths in lostark_paths for path in paths})
-        tag_dict.update({path: '' for paths in lostark_paths for path in paths})
-
-    if not args.sea_path is None:
-        sea_paths, sea_text_dict, sea_decomposed_dict, sea_speaker_dict, sea_emotion_dict, sea_language_dict, sea_gender_dict = Basic_Info_Load(
-            path= args.sea_path,
-            dataset_label= 'SEA',
-            language= 'Korean',
-            gender= 'Female'
-            )
-        sea_paths = Split_Eval(sea_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(sea_paths[0])
-        eval_paths.extend(sea_paths[1])
-        text_dict.update(sea_text_dict)
-        decomposed_dict.update(sea_decomposed_dict)
-        speaker_dict.update(sea_speaker_dict)
-        emotion_dict.update(sea_emotion_dict)
-        language_dict.update(sea_language_dict)
-        gender_dict.update(sea_gender_dict)
-        dataset_dict.update({path: 'SEA' for paths in sea_paths for path in paths})
-        tag_dict.update({path: '' for paths in sea_paths for path in paths})
-    
-    if not args.epic7_path is None:
-        epic7_paths, epic7_text_dict, epic7_decomposed_dict, epic7_speaker_dict, epic7_emotion_dict, epic7_language_dict, epic7_gender_dict = Basic_Info_Load(
-            path= args.epic7_path,
-            dataset_label= 'Epic7',
-            language= {
-                'Angelica': 'Korean',
-                'Angelica_Moonlight': 'Korean',
-                'Bellona': 'Korean',
-                'Bellona_EN': 'English',
-                'Carrot': 'Korean',
-                'Carrot_EN': 'English',
-                'Cerise': 'Korean',
-                'Cerise_EN': 'English',
-                'Elena': 'Korean',
-                'Elena_EN': 'English',
-                'Hazel_EN': 'English',
-                'Khawazu_EN': 'English',
-                'Kluri_EN': 'English',
-                'Lilias': 'Korean',
-                'Lilias_EN': 'English',
-                'Lorina_EN': 'English',
-                'Montmorancy_EN': 'English',
-                'Rass_EN': 'English',
-                'Ray': 'Korean',
-                'Ray_EN': 'English',
-                'Ring_Moonlight': 'Korean',
-                'Ring_Moonlight_EN': 'English',
-                'Roozid_EN': 'English',
-                'Sez_Moonlight': 'Korean',
-                'Sez_Moonlight_EN': 'English',
-                'Vildred_EN': 'English',
-                'Vildred_Moonlight_EN': 'English',
-                'Yufine_EN': 'English',
-                'Tamarinne_Normal': 'Korean',
-                'Tamarinne_Songstress': 'Korean',
-                },
-            gender= {
-                'Angelica': 'Female',
-                'Angelica_Moonlight': 'Female',
-                'Bellona': 'Female',
-                'Bellona_EN': 'Female',
-                'Carrot': 'Female',
-                'Carrot_EN': 'Female',
-                'Cerise': 'Female',
-                'Cerise_EN': 'Female',
-                'Elena': 'Female',
-                'Elena_EN': 'Female',
-                'Hazel_EN': 'Female',
-                'Khawazu_EN': 'Male',
-                'Kluri_EN': 'Female',
-                'Lilias': 'Female',
-                'Lilias_EN': 'Female',
-                'Lorina_EN': 'Female',
-                'Montmorancy_EN': 'Female',
-                'Rass_EN': 'Male',
-                'Ray': 'Male',
-                'Ray_EN': 'Male',
-                'Ring_Moonlight': 'Female',
-                'Ring_Moonlight_EN': 'Female',
-                'Roozid_EN': 'Male',
-                'Sez_Moonlight': 'Male',
-                'Sez_Moonlight_EN': 'Male',
-                'Vildred_EN': 'Male',
-                'Vildred_Moonlight_EN': 'Male',
-                'Yufine_EN': 'Female',
-                'Tamarinne_Normal': 'Female',
-                'Tamarinne_Songstress': 'Female',    
-                }
-            )
-        epic7_paths = Split_Eval(epic7_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(epic7_paths[0])
-        eval_paths.extend(epic7_paths[1])
-        text_dict.update(epic7_text_dict)
-        decomposed_dict.update(epic7_decomposed_dict)
-        speaker_dict.update(epic7_speaker_dict)
-        emotion_dict.update(epic7_emotion_dict)
-        language_dict.update(epic7_language_dict)
-        gender_dict.update(epic7_gender_dict)
-        dataset_dict.update({path: 'Epic7' for paths in epic7_paths for path in paths})
-        tag_dict.update({path: '' for paths in epic7_paths for path in paths})
-
-    if not args.sghvc_path is None:
-        sghvc_paths, sghvc_text_dict, sghvc_decomposed_dict, sghvc_speaker_dict, sghvc_emotion_dict, sghvc_language_dict, sghvc_gender_dict = Basic_Info_Load(
-            path= args.sghvc_path,
-            dataset_label= 'SGHVC',
-            language= 'Korean',
-            gender= 'Female'
-            )
-        sghvc_paths = Split_Eval(sghvc_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(sghvc_paths[0])
-        eval_paths.extend(sghvc_paths[1])
-        text_dict.update(sghvc_text_dict)
-        decomposed_dict.update(sghvc_decomposed_dict)
-        speaker_dict.update(sghvc_speaker_dict)
-        emotion_dict.update(sghvc_emotion_dict)
-        language_dict.update(sghvc_language_dict)
-        gender_dict.update(sghvc_gender_dict)
-        dataset_dict.update({path: 'SGHVC' for paths in sghvc_paths for path in paths})
-        tag_dict.update({path: '' for paths in sghvc_paths for path in paths})
-
-
-    if not args.gp_path is None:
-        gp_paths, gp_text_dict, gp_decomposed_dict, gp_speaker_dict, gp_emotion_dict, gp_language_dict, gp_gender_dict = Basic_Info_Load(
-            path= args.gp_path,            
-            dataset_label= 'GP',
-            language= 'Korean'
-            )
-        gp_paths = Split_Eval(gp_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(gp_paths[0])
-        eval_paths.extend(gp_paths[1])
-        text_dict.update(gp_text_dict)
-        decomposed_dict.update(gp_decomposed_dict)
-        speaker_dict.update(gp_speaker_dict)
-        emotion_dict.update(gp_emotion_dict)
-        language_dict.update(gp_language_dict)
-        gender_dict.update(gp_gender_dict)
-        dataset_dict.update({path: 'GP' for paths in gp_paths for path in paths})
-        tag_dict.update({path: '' for paths in gp_paths for path in paths})
-
-    if not args.youtube_path is None:
-        youtube_paths, youtube_text_dict, youtube_decomposed_dict, youtube_speaker_dict, youtube_emotion_dict, youtube_language_dict, youtube_gender_dict = Basic_Info_Load(
-            path= args.youtube_path,
-            dataset_label= 'Youtube',
-            language= 'Korean'
-            )
-        youtube_paths = Split_Eval(youtube_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(youtube_paths[0])
-        eval_paths.extend(youtube_paths[1])
-        text_dict.update(youtube_text_dict)
-        decomposed_dict.update(youtube_decomposed_dict)
-        speaker_dict.update(youtube_speaker_dict)
-        emotion_dict.update(youtube_emotion_dict)
-        language_dict.update(youtube_language_dict)
-        gender_dict.update(youtube_gender_dict)
-        dataset_dict.update({path: 'Youtube' for paths in youtube_paths for path in paths})
-        tag_dict.update({path: '' for paths in youtube_paths for path in paths})
-
-
-    if not args.gcp_path is None:
-        gcp_paths, gcp_text_dict, gcp_decomposed_dict, gcp_speaker_dict, gcp_emotion_dict, gcp_language_dict, gcp_gender_dict = Basic_Info_Load(
-            path= args.gcp_path,
-            dataset_label= 'GCP',
-            language= {
-                'GCP_EN_Female': 'English',
-                'GCP_EN_Male': 'English',
-                'GCP_KR_Female': 'Korean',
-                'GCP_KR_Male': 'Korean'
-                },
-            gender= {
-                'GCP_EN_Female': 'Female',
-                'GCP_EN_Male': 'Male',
-                'GCP_KR_Female': 'Female',
-                'GCP_KR_Male': 'Male'
-                },
-            )
-        gcp_paths = Split_Eval(gcp_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(gcp_paths[0])
-        eval_paths.extend(gcp_paths[1])
-        text_dict.update(gcp_text_dict)
-        decomposed_dict.update(gcp_decomposed_dict)
-        speaker_dict.update(gcp_speaker_dict)
-        emotion_dict.update(gcp_emotion_dict)
-        language_dict.update(gcp_language_dict)
-        gender_dict.update(gcp_gender_dict)
-        dataset_dict.update({path: 'GCP' for paths in gcp_paths for path in paths})
-        tag_dict.update({path: '' for paths in gcp_paths for path in paths})
-
-    if not args.clova_path is None:
-        clova_paths, clova_text_dict, clova_decomposed_dict, clova_speaker_dict, clova_emotion_dict, clova_language_dict, clova_gender_dict = Basic_Info_Load(
-            path= args.clova_path,
-            dataset_label= 'Clova',
-            language= {
-                'CLOVA_ANNA': 'English',
-                'CLOVA_ARA': 'Korean',
-                'CLOVA_BORA': 'Korean',
-                'CLOVA_CLARA': 'English',
-                'CLOVA_DAIN': 'Korean',
-                'CLOVA_EUNYOUNG': 'Korean',
-                'CLOVA_GOEUN': 'Korean',
-                'CLOVA_HAJUN': 'Korean',
-                'CLOVA_JAEWOOK': 'Korean',
-                'CLOVA_JIHUN': 'Korean',
-                'CLOVA_JINHO': 'Korean',
-                'CLOVA_JIWON': 'Korean',
-                'CLOVA_JIYUN': 'Korean',
-                'CLOVA_JOEY': 'English',
-                'CLOVA_JONGHYUN': 'Korean',
-                'CLOVA_JOONYOUNG': 'Korean',
-                'CLOVA_MATT': 'English',
-                'CLOVA_MIJIN': 'Korean',
-                'CLOVA_MINSANG': 'Korean',
-                'CLOVA_MINSEO': 'Korean',
-                'CLOVA_SEUNGPYO': 'Korean',
-                'CLOVA_SINU': 'Korean',
-                'CLOVA_SUJIN': 'Korean',
-                'CLOVA_SUNHEE': 'Korean',
-                'CLOVA_SUNKYUNG': 'Korean',
-                'CLOVA_TAEJIN': 'Korean',
-                'CLOVA_WONTAK': 'Korean',
-                'CLOVA_YOUNGIL': 'Korean',
-                'CLOVA_YUJIN': 'Korean',
-                },
-            gender= {
-                'CLOVA_ANNA': 'Female',
-                'CLOVA_ARA': 'Female',
-                'CLOVA_BORA': 'Female',
-                'CLOVA_CLARA': 'Female',
-                'CLOVA_DAIN': 'Female',
-                'CLOVA_EUNYOUNG': 'Female',
-                'CLOVA_GOEUN': 'Female',
-                'CLOVA_HAJUN': 'Male',
-                'CLOVA_JAEWOOK': 'Male',
-                'CLOVA_JIHUN': 'Male',
-                'CLOVA_JINHO': 'Male',
-                'CLOVA_JIWON': 'Male',
-                'CLOVA_JIYUN': 'Female',
-                'CLOVA_JOEY': 'Female',
-                'CLOVA_JONGHYUN': 'Male',
-                'CLOVA_JOONYOUNG': 'Male',
-                'CLOVA_MATT': 'Male',
-                'CLOVA_MIJIN': 'Female',
-                'CLOVA_MINSANG': 'Male',
-                'CLOVA_MINSEO': 'Female',
-                'CLOVA_SEUNGPYO': 'Male',
-                'CLOVA_SINU': 'Male',
-                'CLOVA_SUJIN': 'Female',
-                'CLOVA_SUNHEE': 'Female',
-                'CLOVA_SUNKYUNG': 'Female',
-                'CLOVA_TAEJIN': 'Male',
-                'CLOVA_WONTAK': 'Male',
-                'CLOVA_YOUNGIL': 'Male',
-                'CLOVA_YUJIN': 'Female',
-                },
-            )
-        clova_paths = Split_Eval(clova_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(clova_paths[0])
-        eval_paths.extend(clova_paths[1])
-        text_dict.update(clova_text_dict)
-        decomposed_dict.update(clova_decomposed_dict)
-        speaker_dict.update(clova_speaker_dict)
-        emotion_dict.update(clova_emotion_dict)
-        language_dict.update(clova_language_dict)
-        gender_dict.update(clova_gender_dict)        
-        dataset_dict.update({path: 'Clova' for paths in clova_paths for path in paths})
-        tag_dict.update({path: '' for paths in clova_paths for path in paths})
-
-    if not args.maum_path is None:
-        maum_paths, maum_text_dict, maum_decomposed_dict, maum_speaker_dict, maum_emotion_dict, maum_language_dict, maum_gender_dict = Basic_Info_Load(
-            path= args.maum_path,
-            dataset_label= 'Maum',
-            language= {
-                'MAUM_BRANDON': 'English',
-                'MAUM_FEMALE_CALM': 'Korean',
-                'MAUM_FEMALE_HONEST': 'Korean',
-                'MAUM_FEMALE_KID': 'Korean',
-                'MAUM_FEMALE_NATURAL': 'Korean',
-                'MAUM_FEMALE_UNIQUE': 'Korean',
-                'MAUM_FEMALE_VIVID': 'Korean',
-                'MAUM_MALE_CALM': 'Korean',
-                'MAUM_MALE_CAREFUL': 'Korean',
-                'MAUM_MALE_FRIENDLY': 'Korean',
-                'MAUM_MALE_KID': 'Korean',
-                'MAUM_MALE_NATURAL': 'Korean',
-                'MAUM_SELENA': 'English',
-                },
-            gender= {
-                'MAUM_BRANDON': 'Male',
-                'MAUM_FEMALE_CALM': 'Female',
-                'MAUM_FEMALE_HONEST': 'Female',
-                'MAUM_FEMALE_KID': 'Female',
-                'MAUM_FEMALE_NATURAL': 'Female',
-                'MAUM_FEMALE_UNIQUE': 'Female',
-                'MAUM_FEMALE_VIVID': 'Female',
-                'MAUM_MALE_CALM': 'Male',
-                'MAUM_MALE_CAREFUL': 'Male',
-                'MAUM_MALE_FRIENDLY': 'Male',
-                'MAUM_MALE_KID': 'Male',
-                'MAUM_MALE_NATURAL': 'Male',
-                'MAUM_SELENA': 'Female',
-                },
-            )
-        maum_paths = Split_Eval(maum_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(maum_paths[0])
-        eval_paths.extend(maum_paths[1])
-        text_dict.update(maum_text_dict)
-        decomposed_dict.update(maum_decomposed_dict)
-        speaker_dict.update(maum_speaker_dict)
-        emotion_dict.update(maum_emotion_dict)
-        language_dict.update(maum_language_dict)
-        gender_dict.update(maum_gender_dict)
-        dataset_dict.update({path: 'Maum' for paths in maum_paths for path in paths})
-        tag_dict.update({path: '' for paths in maum_paths for path in paths})
-
-    if not args.voice_drama_path is None:
-        voice_drama_paths, voice_drama_text_dict, voice_drama_decomposed_dict, voice_drama_speaker_dict, voice_drama_emotion_dict, voice_drama_language_dict, voice_drama_gender_dict = Basic_Info_Load(
-            path= args.voice_drama_path,
-            dataset_label= 'VD',
-            language= 'Korean',
-            gender= 'Female',
-            )
-        voice_drama_paths = Split_Eval(voice_drama_paths, args.eval_ratio, args.eval_min)
-        train_paths.extend(voice_drama_paths[0])
-        eval_paths.extend(voice_drama_paths[1])
-        text_dict.update(voice_drama_text_dict)
-        decomposed_dict.update(voice_drama_decomposed_dict)
-        speaker_dict.update(voice_drama_speaker_dict)
-        emotion_dict.update(voice_drama_emotion_dict)
-        language_dict.update(voice_drama_language_dict)
-        gender_dict.update(voice_drama_gender_dict)
-        dataset_dict.update({path: 'VD' for paths in voice_drama_paths for path in paths})
-        tag_dict.update({path: '' for paths in voice_drama_paths for path in paths})
 
 
     if not args.vctk_path is None:
@@ -1415,30 +1037,3 @@ if __name__ == '__main__':
 
     Metadata_Generate()
     Metadata_Generate(eval= True)
-
-
-# python Pattern_Generator.py -hp Hyper_Parameters.yaml \
-#     -emo /datasets/rawdata/Emotion \
-#     -kss /datasets/rawdata/KSS \ /datasets/rawdata/Yua_A \
-#     -epic7 /datasets/rawdata/222 \
-#     -gcp /datasets/rawdata/Dataset_Generator_from_External/External/GCP_TTS \
-#     -clova /datasets/rawdata/Dataset_Generator_from_External/External/Clova \
-#     -maum /datasets/rawdata/Dataset_Generator_from_External/External/Maum \
-#     -selectstar /datasets/rawdata/SelectStar \
-#     -mediazen /datasets/rawdata/Mediazen \
-#     -lostark /datasets/rawdata/LostArk \
-#     -sea /datasets/rawdata/Sea \
-#     -vd /datasets/rawdata/Voice_Drama \
-#     -vctk /datasets/rawdata/VCTK \
-#     -libri /datasets/rawdata/LibriTTS/train \
-#     -lj /datasets/rawdata/LJSpeech-1.1 \
-#     -sghvc /datasets/rawdata/SGHVC \
-#     -evalm 3
-
-# python Pattern_Generator.py -hp Hyper_Parameters.yaml -emo E:/emotions -sghvc E:/SGHVC -evalm 3
-# python Pattern_Generator.py -hp Hyper_Parameters.yaml \
-#     -epic7 /datasets/rawdata/Epic_Seven \
-#     -gcp /datasets/rawdata/Dataset_Generator_from_External/External/GCP_TTS \
-#     -clova /datasets/rawdata/Dataset_Generator_from_External/External/Clova \
-#     -maum /datasets/rawdata/Dataset_Generator_from_External/External/Maum \
-#     -evalm 3
