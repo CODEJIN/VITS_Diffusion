@@ -498,8 +498,6 @@ class Trainer:
                     )
                 wandb.log(
                     data= {
-                    'Evaluation.Diffusion.Nosie': wandb.Image(noises[index, :feature_lengths[index]].cpu().numpy()),
-                    'Evaluation.Diffusion.Epsilon': wandb.Image(epsilons[index, :feature_lengths[index]].cpu().numpy()),
                     'Evaluation.Duration': wandb.plot.line_series(
                         xs= np.arange(feature_lengths[index].cpu().numpy()),
                         ys= [
