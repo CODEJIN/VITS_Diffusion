@@ -10,12 +10,13 @@ matplotlib.use('agg')
 import matplotlib.pyplot as plt
 from scipy.io import wavfile
 
-from Modules.Modules import VITS_Diff, Mask_Generate, KL_Loss
+from Modules.Modules_VITS import VITS, Mask_Generate, KL_Loss
 
 from Datasets import Dataset, Inference_Dataset, Collater, Inference_Collater
 from Noam_Scheduler import Noam_Scheduler
 from Logger import Logger
 
+from meldataset import mel_spectrogram, spectral_de_normalize_torch, spectrogram_to_mel
 from distributed import init_distributed, apply_gradient_allreduce, reduce_tensor
 from Arg_Parser import Recursive_Parse, To_Non_Recursive_Dict
 
@@ -172,8 +173,7 @@ class Trainer:
         self.criterion_dict = {
             'MSE': torch.nn.MSELoss(reduce= None).to(self.device),
             'MAE': torch.nn.L1Loss(reduce= None).to(self.device),
-            # 'KL': KL_Loss,
-            'KL': torch.nn.KLDivLoss(reduce= None).to(self.device),
+            'KL': KL_Loss
             }
         self.optimizer = torch.optim.NAdam(
             params= self.model.parameters(),
@@ -207,7 +207,7 @@ class Trainer:
         audio_lengths = audio_lengths.to(self.device, non_blocking=True)
 
         with torch.cuda.amp.autocast(enabled= self.hp.Use_Mixed_Precision):
-            predictions, noises, epsilons, \
+            predictions, offsets, \
             duration_targets, log_duration_predictions, \
             encodings, means_p, log_stds_p, \
             posterior_encodings, means_q, log_stds_q, \
@@ -219,6 +219,34 @@ class Trainer:
                 features= features,
                 feature_lengths= feature_lengths,
                 audios= audios
+                )
+
+            target_mels = spectrogram_to_mel(
+                features,
+                n_fft= self.hp.Sound.N_FFT,
+                num_mels= self.hp.Sound.Mel_Dim,
+                sampling_rate= self.hp.Sound.Sample_Rate,
+                win_size= self.hp.Sound.Frame_Length,
+                fmin= self.hp.Sound.Mel_F_Min,
+                fmax= self.hp.Sound.Mel_F_Max,
+                use_denorm= True
+                )
+
+            target_mels, _ = self.model.segment(
+                patterns= target_mels.permute(0, 2, 1),
+                segment_size= self.hp.Train.Segment_Size,
+                offsets= offsets
+                )
+            target_mels = target_mels.permute(0, 2, 1)
+            prediction_mels = mel_spectrogram(
+                predictions,
+                n_fft= self.hp.Sound.N_FFT,
+                num_mels= self.hp.Sound.Mel_Dim,
+                sampling_rate= self.hp.Sound.Sample_Rate,
+                hop_size= self.hp.Sound.Frame_Shift,
+                win_size= self.hp.Sound.Frame_Length,
+                fmin= self.hp.Sound.Mel_F_Min,
+                fmax= self.hp.Sound.Mel_F_Max,
                 )
 
             audio_masks = Mask_Generate(
@@ -234,29 +262,25 @@ class Trainer:
                 max_length= tokens.size(1)
                 ).to(tokens.device)
 
-            loss_dict['Diffusion'] = self.criterion_dict['MAE'](
-                noises,
-                epsilons
+            loss_dict['Mel'] = self.criterion_dict['MAE'](
+                prediction_mels,
+                target_mels
                 ).mean()
             loss_dict['Log_Duration'] = (self.criterion_dict['MSE'](
                 log_duration_predictions,
                 (duration_targets.float() + 1).log()
                 ) * ~token_masks).mean()
-            # loss_dict['KL'] = self.criterion_dict['KL'](
-            #     posterior_encodings_p= posterior_encodings_p,
-            #     log_stds_q= log_stds_q,
-            #     means_p= means_p,
-            #     log_stds_p= log_stds_p,
-            #     feature_masks= (~feature_masks).unsqueeze(1).float()
-            #     )
-            loss_dict['KL'] = (self.criterion_dict['KL'](
-                means_p * torch.randn_like(log_stds_p) * torch.exp(log_stds_p),
-                posterior_encodings_p.detach()
-                ) * ~feature_masks).mean()
+            loss_dict['KL'] = self.criterion_dict['KL'](
+                posterior_encodings_p= posterior_encodings_p,
+                log_stds_q= log_stds_q,
+                means_p= means_p,
+                log_stds_p= log_stds_p,
+                feature_masks= (~feature_masks).unsqueeze(1).float()
+                )
             
         self.optimizer.zero_grad()
         self.scaler.scale(
-            self.hp.Train.Lambda.Diffusion * loss_dict['Diffusion'] +
+            self.hp.Train.Lambda.Diffusion * loss_dict['Mel'] +
             loss_dict['Log_Duration'] +
             self.hp.Train.Lambda.KL * loss_dict['KL']
             ).backward()
@@ -337,7 +361,7 @@ class Trainer:
         audios = audios.to(self.device, non_blocking=True)
         audio_lengths = audio_lengths.to(self.device, non_blocking=True)
 
-        predictions, noises, epsilons, \
+        predictions, offsets, \
         duration_targets, log_duration_predictions, \
         encodings, means_p, log_stds_p, \
         posterior_encodings, means_q, log_stds_q, \
@@ -350,7 +374,33 @@ class Trainer:
             feature_lengths= feature_lengths,
             audios= audios
             )
-
+        target_mels = spectrogram_to_mel(
+            features,
+            n_fft= self.hp.Sound.N_FFT,
+            num_mels= self.hp.Sound.Mel_Dim,
+            sampling_rate= self.hp.Sound.Sample_Rate,
+            win_size= self.hp.Sound.Frame_Length,
+            fmin= self.hp.Sound.Mel_F_Min,
+            fmax= self.hp.Sound.Mel_F_Max,
+            use_denorm= True
+            )
+        target_mels, _ = self.model.segment(
+            patterns= target_mels.permute(0, 2, 1),
+            segment_size= self.hp.Train.Segment_Size,
+            offsets= offsets
+            )
+        target_mels = target_mels.permute(0, 2, 1)
+        prediction_mels = mel_spectrogram(
+            predictions,
+            n_fft= self.hp.Sound.N_FFT,
+            num_mels= self.hp.Sound.Mel_Dim,
+            sampling_rate= self.hp.Sound.Sample_Rate,
+            hop_size= self.hp.Sound.Frame_Shift,
+            win_size= self.hp.Sound.Frame_Length,
+            fmin= self.hp.Sound.Mel_F_Min,
+            fmax= self.hp.Sound.Mel_F_Max,
+            )
+            
         audio_masks = Mask_Generate(
             lengths= audio_lengths,
             max_length= audios.size(1)
@@ -364,32 +414,28 @@ class Trainer:
             max_length= tokens.size(1)
             ).to(tokens.device)
 
-        loss_dict['Diffusion'] = self.criterion_dict['MAE'](
-            noises,
-            epsilons
+        loss_dict['Mel'] = self.criterion_dict['MAE'](
+            prediction_mels,
+            target_mels
             ).mean()
         loss_dict['Log_Duration'] = (self.criterion_dict['MSE'](
             log_duration_predictions,
             (duration_targets.float() + 1).log()
             ) * ~token_masks).mean()
-        # loss_dict['KL'] = self.criterion_dict['KL'](
-        #     posterior_encodings_p= posterior_encodings_p,
-        #     log_stds_q= log_stds_q,
-        #     means_p= means_p,
-        #     log_stds_p= log_stds_p,
-        #     feature_masks= (~feature_masks).unsqueeze(1).float()
-        #     )        
-        loss_dict['KL'] = (self.criterion_dict['MSE'](
-            means_p * torch.randn_like(log_stds_p) * log_stds_p,
-            posterior_encodings_p
-            ) * ~feature_masks).mean()
+        loss_dict['KL'] = self.criterion_dict['KL'](
+            posterior_encodings_p= posterior_encodings_p,
+            log_stds_q= log_stds_q,
+            means_p= means_p,
+            log_stds_p= log_stds_p,
+            feature_masks= (~feature_masks).unsqueeze(1).float()
+            )
 
         for tag, loss in loss_dict.items():
             loss = reduce_tensor(loss.data, self.num_gpus).item() if self.num_gpus > 1 else loss.item()
             self.scalar_dict['Evaluation']['Loss/{}'.format(tag)] += loss
 
         return \
-            predictions, noises, epsilons, \
+            predictions, offsets, \
             duration_targets, log_duration_predictions, \
             encodings, means_p, log_stds_p, \
             posterior_encodings, means_q, log_stds_q, \
@@ -405,7 +451,7 @@ class Trainer:
             desc='[Evaluation]',
             total= math.ceil(len(self.dataloader_dict['Eval'].dataset) / self.hp.Train.Batch_Size / self.num_gpus)
             ):
-            predictions, noises, epsilons, \
+            predictions, offstes, \
             duration_targets, log_duration_predictions, \
             encodings, means_p, log_stds_p, \
             posterior_encodings, means_q, log_stds_q, \
@@ -449,8 +495,6 @@ class Trainer:
             duration_prediction = torch.arange(duration_prediction.size(0)).repeat_interleave(duration_prediction.cpu()).numpy()
             
             image_dict = {
-                'Diffusion/Noise': (noises[index, :audio_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),
-                'Diffusion/Epsilon': (epsilons[index, :audio_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),                
                 'Duration/Target': (duration_target[:feature_lengths[index]], None, 'auto', (0, features.size(2)), (0, tokens.size(1)), None),
                 'Duration/Prediction': (duration_prediction[:feature_lengths[index]], None, 'auto', (0, features.size(2)), (0, tokens.size(1)), None),
                 }
@@ -482,7 +526,7 @@ class Trainer:
                         keys= ['Target', 'Prediction'],
                         title= 'Duration',
                         xname= 'Feature_t'
-                        ),                    
+                        ),
                     'Evaluation.Audio.Target': wandb.Audio(
                         target_audio,
                         sample_rate= self.hp.Sound.Sample_Rate,
@@ -509,13 +553,13 @@ class Trainer:
         ge2es = ge2es.to(self.device, non_blocking=True)
         emotions = emotions.to(self.device, non_blocking=True)
         
-        predictions, _, _, _, log_duration_predictions, *_ = self.model(
+        predictions, _, _, log_duration_predictions, *_ = self.model(
             tokens= tokens,
             token_lengths= token_lengths,
             ge2es= ge2es,
             emotions= emotions
             )
-        predictions = predictions.clamp(-1.0, 1.0)
+        predictions = predictions.clamp(-1.0, 1.0)        
 
         durations = (log_duration_predictions.exp() - 1).clamp(0, 50).ceil().long()
         feature_lengths = [
@@ -578,7 +622,7 @@ class Trainer:
                 range(len(decomposed_text) + 2),
                 ['<S>'] + list(decomposed_text) + ['<E>'],
                 fontsize = 10
-                ) 
+                )
             plt.tight_layout()
             plt.savefig(os.path.join(self.hp.Inference_Path, 'Step-{}'.format(self.steps), 'PNG', '{}.png'.format(file)).replace('\\', '/'))
             plt.close(new_figure)

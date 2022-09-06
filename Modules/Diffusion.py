@@ -70,14 +70,16 @@ class Difussion(torch.nn.Module):
     def forward(
         self,
         encodings: torch.Tensor,
+        conditions: torch.Tensor,
         audios: torch.Tensor= None
         ):
         '''
         encodings: [Batch, Enc_d, Enc_t]
+        conditions: [Batch,  Enc_d]
         audios: [Batch, Audio_t]
         Audio_t = Enc_t * Hop size
         '''
-        encodings = self.upsampler(encodings)   # [Batch, Enc_d, Audio_t]
+        encodings = self.upsampler(encodings) + conditions.unsqueeze(2)   # [Batch, Enc_d, Audio_t]
 
         if not audios is None:    # train
             diffusion_steps = torch.randint(

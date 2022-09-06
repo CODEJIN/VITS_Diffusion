@@ -112,9 +112,9 @@ class Dataset(torch.utils.data.Dataset):
         
         token = Text_to_Token(pattern_dict['Decomposed'], self.token_dict)
         feature = pattern_dict['Spectrogram']
-        feature_min = self.feature_range_info_dict[speaker]['Min']
-        feature_max = self.feature_range_info_dict[speaker]['Max']
-        feature = (feature - feature_min) / (feature_max - feature_min) * 2.0 - 1.0
+        # feature_min = self.feature_range_info_dict[speaker]['Min']
+        # feature_max = self.feature_range_info_dict[speaker]['Max']
+        # feature = (feature - feature_min) / (feature_max - feature_min) * 2.0 - 1.0
 
         log_f0 = (pattern_dict['Log_F0'] - self.log_f0_info_dict[speaker]['Mean']) / self.log_f0_info_dict[speaker]['Std']
         log_f0 = np.clip(log_f0, -5.0, np.inf)

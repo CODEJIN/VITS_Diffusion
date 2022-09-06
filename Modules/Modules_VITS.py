@@ -6,10 +6,10 @@ from numba import jit
 from typing import Optional, List, Dict, Tuple, Union
 
 from .Diffusion import Difussion
-from .Layer import Linear, Conv1d, Lambda
+from .Layer import Linear, Conv1d, Lambda, ConvTranspose1d
 from .monotonic_align import maximum_path
 
-class VITS_Diff(torch.nn.Module):
+class VITS(torch.nn.Module):
     def __init__(self, hyper_parameters: Namespace):
         super().__init__()
         self.hp = hyper_parameters
@@ -34,7 +34,7 @@ class VITS_Diff(torch.nn.Module):
         self.posterior_encoder = Posterior_Encoder(self.hp)
         self.flow = Flow(self.hp)
 
-        self.diffusion = Difussion(self.hp)
+        self.decoder = Decoder(self.hp)
 
         self.segment = Segment()
 
@@ -97,10 +97,9 @@ class VITS_Diff(torch.nn.Module):
             attentions = maximum_path(neg_cent, attention_masks).detach()
   
         duration_targets = attentions.sum(dim= 1).long()    # [Batch, Token_t]
-
+        
         means_p, log_stds_p, log_duration_predictions = self.variance_predictor_block(
             encodings= encodings,
-            conditions= conditions,
             means_p= means_p,
             log_std_p= log_stds_p,
             durations= duration_targets
@@ -118,10 +117,9 @@ class VITS_Diff(torch.nn.Module):
             offsets= offsets * self.hp.Sound.Frame_Shift
             )
 
-        predictions, noises, epsilons = self.diffusion(
+        predictions = self.decoder(
             encodings= posterior_encodings_slice,
-            conditions= conditions,
-            audios= audios_slice
+            conditions= conditions
             )
 
         '''
@@ -144,7 +142,7 @@ class VITS_Diff(torch.nn.Module):
         '''
 
         return \
-            predictions, noises, epsilons, \
+            predictions, offsets, \
             duration_targets, log_duration_predictions, \
             encodings, means_p, log_stds_p, \
             posterior_encodings, means_q, log_stds_q, \
@@ -159,14 +157,11 @@ class VITS_Diff(torch.nn.Module):
         length_scales: Union[float, List[float], torch.Tensor]= 1.0,
         noise_scales: float= 1.0
         ):
-        length_scales = self.Scale_to_Tensor(tokens= tokens, scale= length_scales)
-
         encodings, means_p, log_stds_p, token_masks = self.encoder(tokens, token_lengths)   # [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t], [Batch, 1, Token_t]
         conditions = self.ge2e(ge2es) + self.emotion_embedding(emotions)    # [Batch, Enc_d]
         
         means_p, log_stds_p, log_duration_predictions = self.variance_predictor_block(
             encodings= encodings,
-            conditions= conditions,
             means_p= means_p,
             log_std_p= log_stds_p,
             length_scales= length_scales,
@@ -179,10 +174,10 @@ class VITS_Diff(torch.nn.Module):
         posterior_encodings_p = means_p + torch.randn_like(means_p) * torch.exp(log_stds_p) * noise_scales  # [Batch, Enc_d, Feature_t]
         posterior_encodings = self.flow(posterior_encodings_p, conditions, feature_masks, reverse= True)   # [Batch, Enc_d, Feature_t]
 
-        predictions, noises, epsilons = self.diffusion(
+        predictions = self.decoder(
             encodings= posterior_encodings,
-            conditions= conditions,
-            )   # [Batch, Audio_t], None, None
+            conditions= conditions
+            )
 
         '''
         predictions: [Batch, Audio_t]
@@ -204,7 +199,7 @@ class VITS_Diff(torch.nn.Module):
         '''
 
         return \
-            predictions, noises, epsilons, \
+            predictions, None, \
             None, log_duration_predictions, \
             encodings, means_p, log_stds_p, \
             posterior_encodings, None, None, \
@@ -503,6 +498,121 @@ class Posterior_Encoder(torch.nn.Module):
         return posterior_encodings, means, log_stds, masks
 
 
+class Decoder(torch.nn.Module):
+    def __init__(
+        self,      
+        hyper_parameters: Namespace
+        ):
+        super().__init__()
+        self.hp = hyper_parameters
+
+        self.prenet = Conv1d(
+            in_channels= self.hp.Encoder.Size,
+            out_channels= self.hp.Decoder.Upsample.Initial_Channels,
+            kernel_size= self.hp.Decoder.Prenet.Kernel_Size,
+            padding= (self.hp.Decoder.Prenet.Kernel_Size - 1) // 2
+            )
+
+        self.condition = Conv1d(
+            in_channels= self.hp.Encoder.Size,
+            out_channels= self.hp.Decoder.Upsample.Initial_Channels,
+            kernel_size= 1,
+            )
+
+        self.upsample = torch.nn.Sequential()
+        previous_channels = self.hp.Decoder.Upsample.Initial_Channels // 2 ** 0
+        for index, (upsample_kernel_size, upsample_stride) in enumerate(zip(
+            self.hp.Decoder.Upsample.Kernel_Size,
+            self.hp.Decoder.Upsample.Rate,
+            )):
+            self.upsample.add_module(f'Upsample_{index}', torch.nn.utils.weight_norm(ConvTranspose1d(
+                in_channels= previous_channels,
+                out_channels= self.hp.Decoder.Upsample.Initial_Channels // 2 ** (index + 1),
+                kernel_size= upsample_kernel_size,
+                stride= upsample_stride,
+                padding= (upsample_kernel_size - upsample_stride) // 2
+                )))
+            self.upsample.add_module(f'Residual_Block_{index}', Decoder_Residual_Block(
+                channels= self.hp.Decoder.Upsample.Initial_Channels // 2 ** (index + 1),
+                kernel_size_list= self.hp.Decoder.Residual_Block.Kernel_Size,
+                dilation_list_of_list= self.hp.Decoder.Residual_Block.Dilation_Size
+                ))
+            previous_channels = self.hp.Decoder.Upsample.Initial_Channels // 2 ** (index + 1)
+        
+        self.upsample.add_module('Mish', torch.nn.Mish())
+        self.upsample.add_module('Postnet', Conv1d(
+            in_channels= previous_channels,
+            out_channels= 1,
+            kernel_size= self.hp.Decoder.Postnet.Kernel_Size,
+            padding= (self.hp.Decoder.Postnet.Kernel_Size - 1) // 2,
+            bias= False
+            ))
+        self.upsample.add_module('Tanh', torch.nn.Tanh())
+        self.upsample.add_module('Squeeze', Lambda(lambda x: x.squeeze(1)))                
+        
+    def forward(
+        self,
+        encodings: torch.Tensor,
+        conditions: torch.Tensor
+        ) -> torch.Tensor:
+        '''
+        encodings: [Batch, Enc_d, Enc_t]
+        '''
+        x = self.prenet(encodings) + self.condition(conditions.unsqueeze(2))
+        x = self.upsample.forward(x)
+
+        return x
+
+class Decoder_Residual_Block(torch.nn.Module):
+    def __init__(
+        self,      
+        channels: int,
+        kernel_size_list: List[int],
+        dilation_list_of_list: List[List[int]]
+        ):
+        super().__init__()
+
+
+        self.blocks = torch.nn.ModuleList()
+        for kernel_size, dilation_list in zip(
+            kernel_size_list,
+            dilation_list_of_list,
+            ):            
+            self.blocks.append(torch.nn.ModuleList([
+                torch.nn.Sequential(
+                    torch.nn.Mish(),
+                    torch.nn.utils.weight_norm(Conv1d(
+                        in_channels= channels,
+                        out_channels= channels,
+                        kernel_size= kernel_size,
+                        dilation= dilation,
+                        padding= ((kernel_size - 1) * dilation) // 2
+                        )),
+                    torch.nn.Mish(),
+                    torch.nn.utils.weight_norm(Conv1d(
+                        in_channels= channels,
+                        out_channels= channels,
+                        kernel_size= kernel_size,
+                        padding= (kernel_size - 1) // 2
+                        ))
+                    )
+                for dilation in dilation_list
+                ]))
+
+    def forward(self, x: torch.Tensor):
+        initial_x = x
+        x_list = []
+        for blocks in self.blocks:
+            x = initial_x
+            for block in blocks:
+                x = block(x) + x
+            x_list.append(x)
+        x = torch.stack(x_list, dim= 1).mean(dim= 1)
+
+        return x
+
+
+
 class Variance_Predictor_Block(torch.nn.Module): 
     def __init__(self, hyper_parameters: Namespace):
         super().__init__()
@@ -520,7 +630,6 @@ class Variance_Predictor_Block(torch.nn.Module):
     def forward(
         self,
         encodings: torch.Tensor,
-        conditions: torch.Tensor,
         means_p: torch.Tensor,
         log_std_p: torch.Tensor,
         durations: torch.Tensor= None,
@@ -528,10 +637,8 @@ class Variance_Predictor_Block(torch.nn.Module):
         ):
         '''
         encodings: [Batch, Enc_d, Enc_t]
-        conditions: [Batch, Enc_d]
         durations: [Batch, Enc_t]
-        '''
-        encodings = encodings + conditions.unsqueeze(2)
+        '''                
         log_duration_predictions = self.duration_predictor(encodings).squeeze(1)   # [Batch, Enc_t]
         if durations is None:
             durations = ((torch.exp(log_duration_predictions) - 1).ceil().clip(0, 50) * length_scales).long()

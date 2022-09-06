@@ -143,6 +143,20 @@ def spectrogram(y, n_fft, hop_size, win_size, center=False):
 
     return spec
 
+def spectrogram_to_mel(spec, n_fft, num_mels, sampling_rate, win_size, fmin, fmax, use_denorm= False):
+    spec = spectral_de_normalize_torch(spec) if use_denorm else spec
+    
+    global mel_basis, hann_window
+    if fmax not in mel_basis:
+        mel = librosa_mel_fn(sampling_rate, n_fft, num_mels, fmin, fmax)
+        mel_basis[str(fmax)+'_'+str(spec.device)] = torch.from_numpy(mel).float().to(spec.device)
+        hann_window[str(spec.device)] = torch.hann_window(win_size).to(spec.device)
+
+    spec = torch.matmul(mel_basis[str(fmax)+'_'+str(spec.device)], spec)
+    spec = spectral_normalize_torch(spec)
+
+    return spec
+
 def spec_energy(y, n_fft, hop_size, win_size, center=False):
     if torch.min(y) < -1.:
         logging.warning('min value is {}'.format(torch.min(y)))
