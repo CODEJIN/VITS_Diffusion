@@ -35,6 +35,10 @@ class ConvTranspose1d(torch.nn.ConvTranspose1d):
             assert self.out_channels % 2 == 0, 'The out_channels of GLU requires even number.'
             torch.nn.init.kaiming_uniform_(self.weight[:self.out_channels // 2], nonlinearity= 'linear')
             torch.nn.init.xavier_uniform_(self.weight[self.out_channels // 2:], gain= torch.nn.init.calculate_gain('sigmoid'))
+        elif self.w_init_gain == 'gate':
+            assert self.out_channels % 2 == 0, 'The out_channels of GLU requires even number.'
+            torch.nn.init.xavier_uniform_(self.weight[:self.out_channels // 2], gain= torch.nn.init.calculate_gain('tanh'))
+            torch.nn.init.xavier_uniform_(self.weight[self.out_channels // 2:], gain= torch.nn.init.calculate_gain('sigmoid'))
         else:
             torch.nn.init.xavier_uniform_(self.weight, gain= torch.nn.init.calculate_gain(self.w_init_gain))
         if not self.bias is None:
@@ -52,6 +56,10 @@ class Conv2d(torch.nn.Conv2d):
             assert self.out_channels % 2 == 0, 'The out_channels of GLU requires even number.'
             torch.nn.init.kaiming_uniform_(self.weight[:self.out_channels // 2], nonlinearity= 'linear')
             torch.nn.init.xavier_uniform_(self.weight[self.out_channels // 2:], gain= torch.nn.init.calculate_gain('sigmoid'))
+        elif self.w_init_gain == 'gate':
+            assert self.out_channels % 2 == 0, 'The out_channels of GLU requires even number.'
+            torch.nn.init.xavier_uniform_(self.weight[:self.out_channels // 2], gain= torch.nn.init.calculate_gain('tanh'))
+            torch.nn.init.xavier_uniform_(self.weight[self.out_channels // 2:], gain= torch.nn.init.calculate_gain('sigmoid'))
         else:
             torch.nn.init.xavier_uniform_(self.weight, gain= torch.nn.init.calculate_gain(self.w_init_gain))
         if not self.bias is None:
@@ -68,6 +76,10 @@ class ConvTranspose2d(torch.nn.ConvTranspose2d):
         elif self.w_init_gain == 'glu':
             assert self.out_channels % 2 == 0, 'The out_channels of GLU requires even number.'
             torch.nn.init.kaiming_uniform_(self.weight[:self.out_channels // 2], nonlinearity= 'linear')
+            torch.nn.init.xavier_uniform_(self.weight[self.out_channels // 2:], gain= torch.nn.init.calculate_gain('sigmoid'))
+        elif self.w_init_gain == 'gate':
+            assert self.out_channels % 2 == 0, 'The out_channels of GLU requires even number.'
+            torch.nn.init.xavier_uniform_(self.weight[:self.out_channels // 2], gain= torch.nn.init.calculate_gain('tanh'))
             torch.nn.init.xavier_uniform_(self.weight[self.out_channels // 2:], gain= torch.nn.init.calculate_gain('sigmoid'))
         else:
             torch.nn.init.xavier_uniform_(self.weight, gain= torch.nn.init.calculate_gain(self.w_init_gain))

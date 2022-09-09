@@ -80,8 +80,6 @@ class Trainer:
 
     def Dataset_Generate(self):
         token_dict = yaml.load(open(self.hp.Token_Path), Loader=yaml.Loader)
-        log_f0_info_dict = yaml.load(open(self.hp.Log_F0_Info_Path), Loader=yaml.Loader)
-        energy_info_dict = yaml.load(open(self.hp.Energy_Info_Path), Loader=yaml.Loader)        
         emotion_info_dict = yaml.load(open(self.hp.Emotion_Info_Path), Loader=yaml.Loader)        
         ge2e_dict = pickle.load(open(self.hp.GE2E.Embedding_Dict_Path, 'rb'))
         feature_range_info_dict = yaml.load(open(self.hp.Spectrogram_Range_Info_Path), Loader=yaml.Loader)
@@ -89,8 +87,6 @@ class Trainer:
         train_dataset = Dataset(
             token_dict= token_dict,
             feature_range_info_dict= feature_range_info_dict,
-            log_f0_info_dict= log_f0_info_dict,
-            energy_info_dict= energy_info_dict,
             ge2e_dict= ge2e_dict,
             emotion_info_dict= emotion_info_dict,
             pattern_path= self.hp.Train.Train_Pattern.Path,
@@ -105,8 +101,6 @@ class Trainer:
         eval_dataset = Dataset(
             token_dict= token_dict,
             feature_range_info_dict= feature_range_info_dict,
-            log_f0_info_dict= log_f0_info_dict,
-            energy_info_dict= energy_info_dict,
             ge2e_dict= ge2e_dict,
             emotion_info_dict= emotion_info_dict,
             pattern_path= self.hp.Train.Eval_Pattern.Path,
@@ -172,8 +166,7 @@ class Trainer:
         self.criterion_dict = {
             'MSE': torch.nn.MSELoss(reduce= None).to(self.device),
             'MAE': torch.nn.L1Loss(reduce= None).to(self.device),
-            # 'KL': KL_Loss,
-            'KL': torch.nn.KLDivLoss(reduce= None).to(self.device),
+            'KL': KL_Loss,
             }
         self.optimizer = torch.optim.NAdam(
             params= self.model.parameters(),
@@ -192,8 +185,7 @@ class Trainer:
         if self.gpu_id == 0:
             logging.info(self.model)
 
-
-    def Train_Step(self, tokens, token_lengths, ge2es, emotions, features, feature_lengths, log_f0s, energies, audios, audio_lengths):
+    def Train_Step(self, tokens, token_lengths, ge2es, emotions, features, feature_lengths, audios, audio_lengths):
         loss_dict = {}
         tokens = tokens.to(self.device, non_blocking=True)
         token_lengths = token_lengths.to(self.device, non_blocking=True)
@@ -201,8 +193,6 @@ class Trainer:
         emotions = emotions.to(self.device, non_blocking=True)
         features = features.to(self.device, non_blocking=True)
         feature_lengths = feature_lengths.to(self.device, non_blocking=True)
-        log_f0s = log_f0s.to(self.device, non_blocking=True)
-        energies = energies.to(self.device, non_blocking=True)
         audios = audios.to(self.device, non_blocking=True)
         audio_lengths = audio_lengths.to(self.device, non_blocking=True)
 
@@ -221,10 +211,6 @@ class Trainer:
                 audios= audios
                 )
 
-            audio_masks = Mask_Generate(
-                lengths= audio_lengths,
-                max_length= audios.size(1)
-                ).to(audios.device)   # [Batch, Audio_t]
             feature_masks = Mask_Generate(
                 lengths= feature_lengths,
                 max_length= features.size(2)
@@ -242,17 +228,13 @@ class Trainer:
                 log_duration_predictions,
                 (duration_targets.float() + 1).log()
                 ) * ~token_masks).mean()
-            # loss_dict['KL'] = self.criterion_dict['KL'](
-            #     posterior_encodings_p= posterior_encodings_p,
-            #     log_stds_q= log_stds_q,
-            #     means_p= means_p,
-            #     log_stds_p= log_stds_p,
-            #     feature_masks= (~feature_masks).unsqueeze(1).float()
-            #     )
-            loss_dict['KL'] = (self.criterion_dict['KL'](
-                means_p * torch.randn_like(log_stds_p) * torch.exp(log_stds_p),
-                posterior_encodings_p.detach()
-                ) * ~feature_masks).mean()
+            loss_dict['KL'] = self.criterion_dict['KL'](
+                posterior_encodings_p= posterior_encodings_p,
+                log_stds_q= log_stds_q,
+                means_p= means_p,
+                log_stds_p= log_stds_p,
+                feature_masks= (~feature_masks).unsqueeze(1).float()
+                )
             
         self.optimizer.zero_grad()
         self.scaler.scale(
@@ -279,7 +261,7 @@ class Trainer:
             self.scalar_dict['Train']['Loss/{}'.format(tag)] += loss
 
     def Train_Epoch(self):
-        for tokens, token_lengths, ge2es, emotions, features, feature_lengths, log_f0s, energies, audios, audio_lengths in self.dataloader_dict['Train']:
+        for tokens, token_lengths, ge2es, emotions, features, feature_lengths, audios, audio_lengths in self.dataloader_dict['Train']:
             self.Train_Step(
                 tokens= tokens,
                 token_lengths= token_lengths,
@@ -287,8 +269,6 @@ class Trainer:
                 emotions= emotions,
                 features= features,
                 feature_lengths= feature_lengths,
-                log_f0s= log_f0s,
-                energies= energies,
                 audios= audios,
                 audio_lengths= audio_lengths
                 )
@@ -324,7 +304,7 @@ class Trainer:
                 return
 
     @torch.no_grad()
-    def Evaluation_Step(self, tokens, token_lengths, ge2es, emotions, features, feature_lengths, log_f0s, energies, audios, audio_lengths):
+    def Evaluation_Step(self, tokens, token_lengths, ge2es, emotions, features, feature_lengths, audios, audio_lengths):
         loss_dict = {}
         tokens = tokens.to(self.device, non_blocking=True)
         token_lengths = token_lengths.to(self.device, non_blocking=True)
@@ -332,8 +312,6 @@ class Trainer:
         emotions = emotions.to(self.device, non_blocking=True)
         features = features.to(self.device, non_blocking=True)
         feature_lengths = feature_lengths.to(self.device, non_blocking=True)
-        log_f0s = log_f0s.to(self.device, non_blocking=True)
-        energies = energies.to(self.device, non_blocking=True)
         audios = audios.to(self.device, non_blocking=True)
         audio_lengths = audio_lengths.to(self.device, non_blocking=True)
 
@@ -351,10 +329,6 @@ class Trainer:
             audios= audios
             )
 
-        audio_masks = Mask_Generate(
-            lengths= audio_lengths,
-            max_length= audios.size(1)
-            ).to(audios.device)   # [Batch, Audio_t]
         feature_masks = Mask_Generate(
             lengths= feature_lengths,
             max_length= features.size(2)
@@ -368,21 +342,18 @@ class Trainer:
             noises,
             epsilons
             ).mean()
+
         loss_dict['Log_Duration'] = (self.criterion_dict['MSE'](
             log_duration_predictions,
             (duration_targets.float() + 1).log()
             ) * ~token_masks).mean()
-        # loss_dict['KL'] = self.criterion_dict['KL'](
-        #     posterior_encodings_p= posterior_encodings_p,
-        #     log_stds_q= log_stds_q,
-        #     means_p= means_p,
-        #     log_stds_p= log_stds_p,
-        #     feature_masks= (~feature_masks).unsqueeze(1).float()
-        #     )        
-        loss_dict['KL'] = (self.criterion_dict['MSE'](
-            means_p * torch.randn_like(log_stds_p) * log_stds_p,
-            posterior_encodings_p
-            ) * ~feature_masks).mean()
+        loss_dict['KL'] = self.criterion_dict['KL'](
+            posterior_encodings_p= posterior_encodings_p,
+            log_stds_q= log_stds_q,
+            means_p= means_p,
+            log_stds_p= log_stds_p,
+            feature_masks= (~feature_masks).unsqueeze(1).float()
+            )
 
         for tag, loss in loss_dict.items():
             loss = reduce_tensor(loss.data, self.num_gpus).item() if self.num_gpus > 1 else loss.item()
@@ -400,7 +371,7 @@ class Trainer:
 
         self.model.eval()
 
-        for step, (tokens, token_lengths, ge2es, emotions, features, feature_lengths, log_f0s, energies, audios, audio_lengths) in tqdm(
+        for step, (tokens, token_lengths, ge2es, emotions, features, feature_lengths, audios, audio_lengths) in tqdm(
             enumerate(self.dataloader_dict['Eval'], 1),
             desc='[Evaluation]',
             total= math.ceil(len(self.dataloader_dict['Eval'].dataset) / self.hp.Train.Batch_Size / self.num_gpus)
@@ -416,8 +387,6 @@ class Trainer:
                 emotions= emotions,
                 features= features,
                 feature_lengths= feature_lengths,
-                log_f0s= log_f0s,
-                energies= energies,
                 audios= audios,
                 audio_lengths= audio_lengths
                 )

@@ -57,8 +57,6 @@ class Dataset(torch.utils.data.Dataset):
         self,
         token_dict: Dict[str, int],
         feature_range_info_dict: Dict[str, Dict[str, float]],
-        log_f0_info_dict: Dict[str, Dict[str, float]],
-        energy_info_dict: Dict[str, Dict[str, float]],
         ge2e_dict: Dict[str, int],
         emotion_info_dict: Dict[str, int],
         pattern_path: str,
@@ -73,8 +71,6 @@ class Dataset(torch.utils.data.Dataset):
         super().__init__()
         self.token_dict = token_dict
         self.feature_range_info_dict = feature_range_info_dict
-        self.log_f0_info_dict = log_f0_info_dict
-        self.energy_info_dict = energy_info_dict
         self.ge2e_dict = ge2e_dict
         self.emotion_info_dict = emotion_info_dict
         self.pattern_path = pattern_path
@@ -112,16 +108,8 @@ class Dataset(torch.utils.data.Dataset):
         
         token = Text_to_Token(pattern_dict['Decomposed'], self.token_dict)
         feature = pattern_dict['Spectrogram']
-        # feature_min = self.feature_range_info_dict[speaker]['Min']
-        # feature_max = self.feature_range_info_dict[speaker]['Max']
-        # feature = (feature - feature_min) / (feature_max - feature_min) * 2.0 - 1.0
 
-        log_f0 = (pattern_dict['Log_F0'] - self.log_f0_info_dict[speaker]['Mean']) / self.log_f0_info_dict[speaker]['Std']
-        log_f0 = np.clip(log_f0, -5.0, np.inf)
-        energy = (pattern_dict['Energy'] - self.energy_info_dict[speaker]['Mean']) / self.energy_info_dict[speaker]['Std']
-        energy = np.clip(energy, -1.5, np.inf)
-
-        return token, self.ge2e_dict[speaker], self.emotion_info_dict[emotion], feature, log_f0, energy, pattern_dict['Audio']
+        return token, self.ge2e_dict[speaker], self.emotion_info_dict[emotion], feature, pattern_dict['Audio']
 
     def __len__(self):
         return len(self.patterns)
@@ -175,7 +163,7 @@ class Collater:
         self.token_dict = token_dict
 
     def __call__(self, batch):
-        tokens, ge2es, emotions, features, log_f0s, energies, audios  = zip(*batch)
+        tokens, ge2es, emotions, features, audios  = zip(*batch)
         token_lengths = np.array([token.shape[0] for token in tokens])
         feature_lengths = np.array([feature.shape[0] for feature in features])
         audio_lengths = np.array([audio.shape[0] for audio in audios])
@@ -184,8 +172,6 @@ class Collater:
         ge2es = np.array(ge2es)
 
         features = Feature_Stack(features)
-        log_f0s = Log_F0_Stack(log_f0s)
-        energies = Energy_Stack(energies)
         audios = Audio_Stack(audios)
 
         tokens = torch.LongTensor(tokens)   # [Batch, Token_t]
@@ -194,12 +180,10 @@ class Collater:
         ge2es = torch.FloatTensor(ge2es)   # [Batch, GE2E_dim]
         emotions = torch.LongTensor(emotions)  # [Batch]
         feature_lengths = torch.LongTensor(feature_lengths)   # [Batch]
-        log_f0s = torch.FloatTensor(log_f0s)    # [Batch, Feature_t]
-        energies = torch.FloatTensor(energies)  # [Batch, Feature_t]
         audios = torch.FloatTensor(audios)  # [Batch, Audio_t]
         audio_lengths = torch.LongTensor(audio_lengths)   # [Batch]
 
-        return tokens, token_lengths, ge2es, emotions, features, feature_lengths, log_f0s, energies, audios, audio_lengths
+        return tokens, token_lengths, ge2es, emotions, features, feature_lengths, audios, audio_lengths
 
 class Inference_Collater:
     def __init__(self,

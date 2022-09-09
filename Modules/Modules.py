@@ -5,7 +5,7 @@ import math
 from numba import jit
 from typing import Optional, List, Dict, Tuple, Union
 
-from .Diffusion import Difussion
+from .Diffusion import Diffusion
 from .Layer import Linear, Conv1d, Lambda
 from .monotonic_align import maximum_path
 
@@ -34,7 +34,7 @@ class VITS_Diff(torch.nn.Module):
         self.posterior_encoder = Posterior_Encoder(self.hp)
         self.flow = Flow(self.hp)
 
-        self.diffusion = Difussion(self.hp)
+        self.diffusion = Diffusion(self.hp)
 
         self.segment = Segment()
 
@@ -81,7 +81,7 @@ class VITS_Diff(torch.nn.Module):
         ):
         encodings, means_p, log_stds_p, token_masks = self.encoder(tokens, token_lengths)   # [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t], [Batch, 1, Token_t]
         conditions = self.ge2e(ge2es) + self.emotion_embedding(emotions)    # [Batch, Enc_d]
-        posterior_encodings, means_q, log_stds_q, feature_masks = self.posterior_encoder(features, feature_lengths, conditions)  # [Batch, Enc_d, Feature_t], [Batch, Enc_d, Feature_t], [Batch, Enc_d, Feature_t], [Batch, 1, Feature_t]
+        posterior_encodings, means_q, log_stds_q, feature_masks = self.posterior_encoder(features, feature_lengths)  # [Batch, Enc_d, Feature_t], [Batch, Enc_d, Feature_t], [Batch, Enc_d, Feature_t], [Batch, 1, Feature_t]
         posterior_encodings_p = self.flow(posterior_encodings, conditions, feature_masks)   # [Batch, Enc_d, Feature_t]
 
         with torch.no_grad():
@@ -119,8 +119,7 @@ class VITS_Diff(torch.nn.Module):
             )
 
         predictions, noises, epsilons = self.diffusion(
-            encodings= posterior_encodings_slice,
-            conditions= conditions,
+            conditions= posterior_encodings_slice + conditions.unsqueeze(2),
             audios= audios_slice
             )
 
@@ -180,8 +179,7 @@ class VITS_Diff(torch.nn.Module):
         posterior_encodings = self.flow(posterior_encodings_p, conditions, feature_masks, reverse= True)   # [Batch, Enc_d, Feature_t]
 
         predictions, noises, epsilons = self.diffusion(
-            encodings= posterior_encodings,
-            conditions= conditions,
+            conditions= posterior_encodings + conditions.unsqueeze(2),
             )   # [Batch, Audio_t], None, None
 
         '''
@@ -468,36 +466,33 @@ class Posterior_Encoder(torch.nn.Module):
 
         feature_size = self.hp.Sound.N_FFT // 2 + 1
 
-        self.prenet = Conv1d(
-            in_channels = feature_size,
-            out_channels= self.hp.Encoder.Size,
-            kernel_size= 1
-            )
-        self.wavenet = WaveNet(
-            channels= self.hp.Encoder.Size,
-            condition_channels= self.hp.Encoder.Size,
-            kernel_size= self.hp.Posterior_Encoder.WaveNet.Kernel_Size,
-            dilation_rate= self.hp.Posterior_Encoder.WaveNet.Dilation_Rate,
-            stack= self.hp.Posterior_Encoder.WaveNet.Stack,
-            dropout_rate= self.hp.Posterior_Encoder.WaveNet.Dropout_Rate
-            )
-        self.projection = Conv1d(
-            in_channels = self.hp.Encoder.Size,
-            out_channels= self.hp.Encoder.Size * 2,
-            kernel_size= 1
+        self.prenet = torch.nn.Sequential(
+            Conv1d(
+                in_channels = feature_size,
+                out_channels= self.hp.Encoder.Size * 4,
+                kernel_size= 1,
+                w_init_gain= 'relu'
+                ),
+            torch.nn.BatchNorm1d(
+                num_features= self.hp.Encoder.Size * 4
+                ),
+            torch.nn.Mish(),
+            Conv1d(
+                in_channels = self.hp.Encoder.Size * 4,
+                out_channels= self.hp.Encoder.Size * 2,
+                kernel_size= 1,
+                w_init_gain= 'linear'
+                )            
             )
 
     def forward(
         self,
         features: torch.Tensor,
-        feature_lengths: torch.Tensor,
-        conditions: torch.Tensor,
+        feature_lengths: torch.Tensor
         ) -> torch.Tensor:
         masks = (~Mask_Generate(lengths= feature_lengths, max_length= torch.ones_like(features[0, 0]).sum())).unsqueeze(1).float()
 
-        features = self.prenet(features)
-        features = self.wavenet(features, conditions, masks)
-        means, log_stds = (self.projection(features) * masks).chunk(chunks= 2, dim= 1)
+        means, log_stds = (self.prenet(features) * masks).chunk(chunks= 2, dim= 1)
         posterior_encodings = means + torch.randn_like(log_stds) * masks * log_stds.exp()
  
         return posterior_encodings, means, log_stds, masks

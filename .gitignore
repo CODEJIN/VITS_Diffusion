@@ -3,6 +3,7 @@
 /Modules/__pycache__
 /results
 /results_vits
+/inference_wav
 /wandb
 *.pyc
 
