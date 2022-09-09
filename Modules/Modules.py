@@ -42,8 +42,6 @@ class VITS_Diff(torch.nn.Module):
         self,
         tokens: torch.Tensor,
         token_lengths: torch.Tensor,
-        ge2es: torch.Tensor,
-        emotions: torch.Tensor,
         features: torch.FloatTensor= None,
         feature_lengths: torch.Tensor= None,
         audios: torch.FloatTensor= None,
@@ -54,8 +52,6 @@ class VITS_Diff(torch.nn.Module):
             return self.Train(
                 tokens= tokens,
                 token_lengths= token_lengths,
-                ge2es= ge2es,
-                emotions= emotions,
                 features= features,
                 feature_lengths= feature_lengths,
                 audios= audios,
@@ -64,8 +60,6 @@ class VITS_Diff(torch.nn.Module):
             return self.Inference(
                 tokens= tokens,
                 token_lengths= token_lengths,
-                ge2es= ge2es,
-                emotions= emotions,
                 length_scales= length_scales,
                 )
 
@@ -73,16 +67,13 @@ class VITS_Diff(torch.nn.Module):
         self,
         tokens: torch.Tensor,
         token_lengths: torch.Tensor,
-        ge2es: torch.Tensor,
-        emotions: torch.Tensor,
         features: torch.FloatTensor,
         feature_lengths: torch.Tensor,
         audios: torch.FloatTensor,
         ):
         encodings, means_p, log_stds_p, token_masks = self.encoder(tokens, token_lengths)   # [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t], [Batch, 1, Token_t]
-        conditions = self.ge2e(ge2es) + self.emotion_embedding(emotions)    # [Batch, Enc_d]
         posterior_encodings, means_q, log_stds_q, feature_masks = self.posterior_encoder(features, feature_lengths)  # [Batch, Enc_d, Feature_t], [Batch, Enc_d, Feature_t], [Batch, Enc_d, Feature_t], [Batch, 1, Feature_t]
-        posterior_encodings_p = self.flow(posterior_encodings, conditions, feature_masks)   # [Batch, Enc_d, Feature_t]
+        posterior_encodings_p = self.flow(posterior_encodings, feature_masks)   # [Batch, Enc_d, Feature_t]
 
         with torch.no_grad():
             # negative cross-entropy
@@ -95,12 +86,22 @@ class VITS_Diff(torch.nn.Module):
 
             attention_masks = token_masks * feature_masks.permute(0, 2, 1)  # [Batch, 1, Token_t] x [Batch, Feature_t, 1] -> [Batch, Feature_t, Token_t]
             attentions = maximum_path(neg_cent, attention_masks).detach()
+
+        with torch.no_grad():
+            stds_p_sq_r = torch.exp(-2 * log_stds_p)    # [Batch, Enc_d, Token_t]
+            logp1 = torch.sum(-0.5 * math.log(2 * math.pi) - log_stds_p, [1]).unsqueeze(-1) # [Batch, Token_t, 1]
+            logp2 = torch.matmul(stds_p_sq_r.transpose(1,2), -0.5 * (features ** 2)) # [Batch, Token_t, Enc_d] x [Batch, Feature_d, Feature_t] = [Batch, Token_t, Feature_t]
+            logp3 = torch.matmul((means_p * stds_p_sq_r).transpose(1,2), features) # [Batch, Token_t, Enc_d] x [Batch, Feature_d, Feature_t] = [Batch, Token_t, Feature_t]
+            logp4 = torch.sum(-0.5 * (means_p ** 2) * stds_p_sq_r, [1]).unsqueeze(-1) # [Batch, Token_t, 1]
+            logp = logp1 + logp2 + logp3 + logp4 # [b, t, t']
+            
+            attention_masks = token_masks * feature_masks.permute(0, 2, 1)  # [Batch, 1, Token_t] x [Batch, Feature_t, 1] -> [Batch, Feature_t, Token_t]
+            attn = maximum_path(logp, attn_mask.squeeze(1)).unsqueeze(1).detach()
   
         duration_targets = attentions.sum(dim= 1).long()    # [Batch, Token_t]
 
         means_p, log_stds_p, log_duration_predictions = self.variance_predictor_block(
             encodings= encodings,
-            conditions= conditions,
             means_p= means_p,
             log_std_p= log_stds_p,
             durations= duration_targets
@@ -119,7 +120,7 @@ class VITS_Diff(torch.nn.Module):
             )
 
         predictions, noises, epsilons = self.diffusion(
-            conditions= posterior_encodings_slice + conditions.unsqueeze(2),
+            conditions= posterior_encodings_slice,
             audios= audios_slice
             )
 
@@ -153,19 +154,15 @@ class VITS_Diff(torch.nn.Module):
         self,
         tokens: torch.Tensor,
         token_lengths: torch.Tensor,
-        ge2es: torch.Tensor,
-        emotions: torch.Tensor,
         length_scales: Union[float, List[float], torch.Tensor]= 1.0,
         noise_scales: float= 1.0
         ):
         length_scales = self.Scale_to_Tensor(tokens= tokens, scale= length_scales)
 
         encodings, means_p, log_stds_p, token_masks = self.encoder(tokens, token_lengths)   # [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t], [Batch, 1, Token_t]
-        conditions = self.ge2e(ge2es) + self.emotion_embedding(emotions)    # [Batch, Enc_d]
         
         means_p, log_stds_p, log_duration_predictions = self.variance_predictor_block(
             encodings= encodings,
-            conditions= conditions,
             means_p= means_p,
             log_std_p= log_stds_p,
             length_scales= length_scales,
@@ -176,10 +173,10 @@ class VITS_Diff(torch.nn.Module):
             )).unsqueeze(1).float()  # [Batch, 1, Feature_t]
 
         posterior_encodings_p = means_p + torch.randn_like(means_p) * torch.exp(log_stds_p) * noise_scales  # [Batch, Enc_d, Feature_t]
-        posterior_encodings = self.flow(posterior_encodings_p, conditions, feature_masks, reverse= True)   # [Batch, Enc_d, Feature_t]
+        posterior_encodings = self.flow(posterior_encodings_p, feature_masks, reverse= True)   # [Batch, Enc_d, Feature_t]
 
         predictions, noises, epsilons = self.diffusion(
-            conditions= posterior_encodings + conditions.unsqueeze(2),
+            conditions= posterior_encodings,
             )   # [Batch, Audio_t], None, None
 
         '''
@@ -313,13 +310,12 @@ class Flow(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        conditions: torch.Tensor,
         masks: torch.Tensor,
         reverse: bool= False
         ) -> torch.Tensor:
         blocks = self.flow_blocks if not reverse else reversed(self.flow_blocks)
         for block in blocks:
-            x = block(x, conditions, masks, reverse)
+            x = block(x, masks, reverse)
 
         return x
 
@@ -350,7 +346,6 @@ class Flow_Block(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        conditions: torch.Tensor,
         masks: torch.Tensor,
         reverse: bool= False
         ) -> torch.Tensor:
@@ -359,7 +354,7 @@ class Flow_Block(torch.nn.Module):
 
         x_0, x_1 = x.chunk(chunks= 2, dim= 1)
         x = self.prenet(x_0)
-        x = self.wavenet(x, conditions, masks)
+        x = self.wavenet(x, masks)
         x = self.postnet(x)
 
         if not reverse:
@@ -412,35 +407,17 @@ class WaveNet(torch.nn.Module):
             for index in range(stack)
             ])
 
-        self.condition = torch.nn.Sequential(
-            Lambda(lambda x: x.unsqueeze(2)),
-            torch.nn.utils.weight_norm(Conv1d(
-                in_channels= condition_channels,
-                out_channels= stack * channels * 2,
-                kernel_size= 1,
-                w_init_gain= 'gate'
-                )),
-            Lambda(lambda x: x.view(
-                x.size(0),
-                stack,
-                channels * 2, 1
-                ).permute(1, 0, 2, 3)),
-            )
-
     def forward(
         self,
         x: torch.Tensor,
-        condtions: torch.Tensor,
         masks: torch.Tensor
         ) -> torch.Tensor:
-        condition_stacks = self.condition(condtions)    # [Stack, Batch, Dim * 2, 1]
-
         skips_list = []
-        for index, (in_block, residual_block, skip_block, conditions) in enumerate(zip(
-            self.in_blocks, self.resisual_blocks, self.skip_blocks, condition_stacks
+        for index, (in_block, residual_block, skip_block) in enumerate(zip(
+            self.in_blocks, self.resisual_blocks, self.skip_blocks
             )):
             x_ins = in_block(x)
-            x_ins = self.gated_activation(x_ins, conditions)
+            x_ins = self.gated_activation(x_ins, torch.zeros_like(x_ins))
             x_ins = self.dropout(x_ins)
             
             skips_list.append(skip_block(x_ins))
@@ -515,7 +492,6 @@ class Variance_Predictor_Block(torch.nn.Module):
     def forward(
         self,
         encodings: torch.Tensor,
-        conditions: torch.Tensor,
         means_p: torch.Tensor,
         log_std_p: torch.Tensor,
         durations: torch.Tensor= None,
@@ -523,10 +499,9 @@ class Variance_Predictor_Block(torch.nn.Module):
         ):
         '''
         encodings: [Batch, Enc_d, Enc_t]
-        conditions: [Batch, Enc_d]
         durations: [Batch, Enc_t]
         '''
-        encodings = encodings + conditions.unsqueeze(2)
+        encodings = encodings.detach()
         log_duration_predictions = self.duration_predictor(encodings).squeeze(1)   # [Batch, Enc_t]
         if durations is None:
             durations = ((torch.exp(log_duration_predictions) - 1).ceil().clip(0, 50) * length_scales).long()

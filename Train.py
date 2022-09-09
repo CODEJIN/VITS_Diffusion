@@ -80,15 +80,11 @@ class Trainer:
 
     def Dataset_Generate(self):
         token_dict = yaml.load(open(self.hp.Token_Path), Loader=yaml.Loader)
-        emotion_info_dict = yaml.load(open(self.hp.Emotion_Info_Path), Loader=yaml.Loader)        
-        ge2e_dict = pickle.load(open(self.hp.GE2E.Embedding_Dict_Path, 'rb'))
         feature_range_info_dict = yaml.load(open(self.hp.Spectrogram_Range_Info_Path), Loader=yaml.Loader)
 
         train_dataset = Dataset(
             token_dict= token_dict,
             feature_range_info_dict= feature_range_info_dict,
-            ge2e_dict= ge2e_dict,
-            emotion_info_dict= emotion_info_dict,
             pattern_path= self.hp.Train.Train_Pattern.Path,
             metadata_file= self.hp.Train.Train_Pattern.Metadata_File,
             feature_length_min= self.hp.Train.Train_Pattern.Feature_Length.Min,
@@ -101,8 +97,6 @@ class Trainer:
         eval_dataset = Dataset(
             token_dict= token_dict,
             feature_range_info_dict= feature_range_info_dict,
-            ge2e_dict= ge2e_dict,
-            emotion_info_dict= emotion_info_dict,
             pattern_path= self.hp.Train.Eval_Pattern.Path,
             metadata_file= self.hp.Train.Eval_Pattern.Metadata_File,
             feature_length_min= self.hp.Train.Eval_Pattern.Feature_Length.Min,
@@ -112,11 +106,7 @@ class Trainer:
             )
         inference_dataset = Inference_Dataset(
             token_dict= token_dict,
-            ge2e_dict= ge2e_dict,
-            emotion_info_dict= emotion_info_dict,
             texts= self.hp.Train.Inference_in_Train.Text,
-            speakers= self.hp.Train.Inference_in_Train.Speaker,
-            emotions= self.hp.Train.Inference_in_Train.Emotion
             )
 
         if self.gpu_id == 0:
@@ -185,12 +175,10 @@ class Trainer:
         if self.gpu_id == 0:
             logging.info(self.model)
 
-    def Train_Step(self, tokens, token_lengths, ge2es, emotions, features, feature_lengths, audios, audio_lengths):
+    def Train_Step(self, tokens, token_lengths, features, feature_lengths, audios, audio_lengths):
         loss_dict = {}
         tokens = tokens.to(self.device, non_blocking=True)
         token_lengths = token_lengths.to(self.device, non_blocking=True)
-        ge2es = ge2es.to(self.device, non_blocking=True)
-        emotions = emotions.to(self.device, non_blocking=True)
         features = features.to(self.device, non_blocking=True)
         feature_lengths = feature_lengths.to(self.device, non_blocking=True)
         audios = audios.to(self.device, non_blocking=True)
@@ -204,8 +192,6 @@ class Trainer:
             posterior_encodings_p = self.model(
                 tokens= tokens,
                 token_lengths= token_lengths,
-                ge2es= ge2es,
-                emotions= emotions,
                 features= features,
                 feature_lengths= feature_lengths,
                 audios= audios
@@ -261,12 +247,10 @@ class Trainer:
             self.scalar_dict['Train']['Loss/{}'.format(tag)] += loss
 
     def Train_Epoch(self):
-        for tokens, token_lengths, ge2es, emotions, features, feature_lengths, audios, audio_lengths in self.dataloader_dict['Train']:
+        for tokens, token_lengths, features, feature_lengths, audios, audio_lengths in self.dataloader_dict['Train']:
             self.Train_Step(
                 tokens= tokens,
                 token_lengths= token_lengths,
-                ge2es= ge2es,
-                emotions= emotions,
                 features= features,
                 feature_lengths= feature_lengths,
                 audios= audios,
@@ -304,12 +288,10 @@ class Trainer:
                 return
 
     @torch.no_grad()
-    def Evaluation_Step(self, tokens, token_lengths, ge2es, emotions, features, feature_lengths, audios, audio_lengths):
+    def Evaluation_Step(self, tokens, token_lengths, features, feature_lengths, audios, audio_lengths):
         loss_dict = {}
         tokens = tokens.to(self.device, non_blocking=True)
         token_lengths = token_lengths.to(self.device, non_blocking=True)
-        ge2es = ge2es.to(self.device, non_blocking=True)
-        emotions = emotions.to(self.device, non_blocking=True)
         features = features.to(self.device, non_blocking=True)
         feature_lengths = feature_lengths.to(self.device, non_blocking=True)
         audios = audios.to(self.device, non_blocking=True)
@@ -322,8 +304,6 @@ class Trainer:
         posterior_encodings_p = self.model(
             tokens= tokens,
             token_lengths= token_lengths,
-            ge2es= ge2es,
-            emotions= emotions,
             features= features,
             feature_lengths= feature_lengths,
             audios= audios
@@ -371,7 +351,7 @@ class Trainer:
 
         self.model.eval()
 
-        for step, (tokens, token_lengths, ge2es, emotions, features, feature_lengths, audios, audio_lengths) in tqdm(
+        for step, (tokens, token_lengths, features, feature_lengths, audios, audio_lengths) in tqdm(
             enumerate(self.dataloader_dict['Eval'], 1),
             desc='[Evaluation]',
             total= math.ceil(len(self.dataloader_dict['Eval'].dataset) / self.hp.Train.Batch_Size / self.num_gpus)
@@ -383,8 +363,6 @@ class Trainer:
             posterior_encodings_p = self.Evaluation_Step(
                 tokens= tokens,
                 token_lengths= token_lengths,
-                ge2es= ge2es,
-                emotions= emotions,
                 features= features,
                 feature_lengths= feature_lengths,
                 audios= audios,
@@ -404,9 +382,7 @@ class Trainer:
             with torch.no_grad():
                 prediction_audio, *_ = self.model(
                     tokens= tokens[index].unsqueeze(0).to(self.device),
-                    token_lengths= token_lengths[index].unsqueeze(0).to(self.device),
-                    ge2es= ge2es[index].unsqueeze(0).to(self.device),
-                    emotions= emotions[index].unsqueeze(0).to(self.device),                    
+                    token_lengths= token_lengths[index].unsqueeze(0).to(self.device),          
                     )
 
             target_audio = audios[index].cpu().numpy()
@@ -472,17 +448,13 @@ class Trainer:
         self.model.train()
 
     @torch.no_grad()
-    def Inference_Step(self, tokens, token_lengths, ge2es, emotions, texts, decomposed_texts, speaker_labels, emotion_labels, start_index= 0, tag_step= False):
+    def Inference_Step(self, tokens, token_lengths, texts, decomposed_texts, start_index= 0, tag_step= False):
         tokens = tokens.to(self.device, non_blocking=True)
         token_lengths = token_lengths.to(self.device, non_blocking=True)
-        ge2es = ge2es.to(self.device, non_blocking=True)
-        emotions = emotions.to(self.device, non_blocking=True)
         
         predictions, _, _, _, log_duration_predictions, *_ = self.model(
             tokens= tokens,
-            token_lengths= token_lengths,
-            ge2es= ge2es,
-            emotions= emotions
+            token_lengths= token_lengths
             )
         predictions = predictions.clamp(-1.0, 1.0)
 
@@ -518,8 +490,6 @@ class Trainer:
             audio_length,
             text,
             decomposed_text,
-            speaker,
-            emotion,
             file
             ) in enumerate(zip(
             predictions.cpu().numpy(),
@@ -529,11 +499,9 @@ class Trainer:
             audio_lengths,
             texts,
             decomposed_texts,
-            speaker_labels,
-            emotion_labels,
             files
             )):
-            title = 'Text: {}    Speaker: {}    Emotion: {}'.format(text if len(text) < 90 else text[:90] + '…', speaker, emotion)
+            title = 'Text: {}'.format(text if len(text) < 90 else text[:90] + '…')
             new_figure = plt.figure(figsize=(20, 5 * 5), dpi=100)
             ax = plt.subplot2grid((3, 1), (0, 0))            
             plt.plot(prediction[:audio_length])
@@ -567,12 +535,12 @@ class Trainer:
         self.model.eval()
 
         batch_size = self.hp.Inference_Batch_Size or self.hp.Train.Batch_Size
-        for step, (tokens, token_lengths, ge2es, emotions, texts, decomposed_texts, speaker_labels, emotion_labels) in tqdm(
+        for step, (tokens, token_lengths, texts, decomposed_texts) in tqdm(
             enumerate(self.dataloader_dict['Inference']),
             desc='[Inference]',
             total= math.ceil(len(self.dataloader_dict['Inference'].dataset) / batch_size)
             ):
-            self.Inference_Step(tokens, token_lengths, ge2es, emotions, texts, decomposed_texts, speaker_labels, emotion_labels, start_index= step * batch_size)
+            self.Inference_Step(tokens, token_lengths, texts, decomposed_texts, start_index= step * batch_size)
 
         self.model.train()
 

@@ -94,21 +94,21 @@ GE2E:
     Frame_Length: 240
     Embedding_Dict_Path: './GE2E_KREN1394.pickle'
 
-Token_Path: './22K.Emotion/Token.yaml'
+Token_Path: './22K.AIHub_YYS/Token.yaml'
 Duration_Path: './Duration_KREN1394.pickle'
-Spectrogram_Range_Info_Path: './22K.Emotion/Spectrogram_Range_Info.yaml'
-Mel_Range_Info_Path: './22K.Emotion/Mel_Range_Info.yaml'
-Log_F0_Info_Path: './22K.Emotion/Log_F0_Info.yaml'
-Energy_Info_Path: './22K.Emotion/Energy_Info.yaml'
-Speaker_Info_Path: './22K.Emotion/Speaker_Info.yaml'
-Emotion_Info_Path: './22K.Emotion/Emotion_Info.yaml'
-Language_Info_Path: './22K.Emotion/Language_Info.yaml'
-Gender_Info_Path: './22K.Emotion/Gender_Info.yaml'
-Language_and_Gender_Info_by_Speaker_Path: './22K.Emotion/Language_and_Gender_Info_by_Speaker.yaml'
+Spectrogram_Range_Info_Path: './22K.AIHub_YYS/Spectrogram_Range_Info.yaml'
+Mel_Range_Info_Path: './22K.AIHub_YYS/Mel_Range_Info.yaml'
+Log_F0_Info_Path: './22K.AIHub_YYS/Log_F0_Info.yaml'
+Energy_Info_Path: './22K.AIHub_YYS/Energy_Info.yaml'
+Speaker_Info_Path: './22K.AIHub_YYS/Speaker_Info.yaml'
+Emotion_Info_Path: './22K.AIHub_YYS/Emotion_Info.yaml'
+Language_Info_Path: './22K.AIHub_YYS/Language_Info.yaml'
+Gender_Info_Path: './22K.AIHub_YYS/Gender_Info.yaml'
+Language_and_Gender_Info_by_Speaker_Path: './22K.AIHub_YYS/Language_and_Gender_Info_by_Speaker.yaml'
 Train:
     Use_Pattern_Cache: true
     Train_Pattern:
-        Path: './22K.Emotion/Train'
+        Path: './22K.AIHub_YYS/Train'
         Metadata_File: 'METADATA.PICKLE'
         Feature_Length:
             Min: 50
@@ -119,7 +119,7 @@ Train:
         Accumulated_Dataset_Epoch: 1   # This is to prevent slow down from torch.utils.data.DataLoader when the number of patterns is small.
         Augmentation_Ratio: 0.20
     Eval_Pattern:
-        Path: './22K.Emotion/Eval'
+        Path: './22K.AIHub_YYS/Eval'
         Metadata_File: 'METADATA.PICKLE'
         Feature_Length:
             Min: 50
