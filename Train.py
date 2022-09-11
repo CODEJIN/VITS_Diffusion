@@ -187,9 +187,7 @@ class Trainer:
         with torch.cuda.amp.autocast(enabled= self.hp.Use_Mixed_Precision):
             predictions, noises, epsilons, \
             duration_targets, log_duration_predictions, \
-            encodings, means_p, log_stds_p, \
-            posterior_encodings, means_q, log_stds_q, \
-            posterior_encodings_p = self.model(
+            encodings, means_p, log_stds_p, = self.model(
                 tokens= tokens,
                 token_lengths= token_lengths,
                 features= features,
@@ -210,13 +208,13 @@ class Trainer:
                 noises,
                 epsilons
                 ).mean()
-            loss_dict['Log_Duration'] = (self.criterion_dict['MSE'](
-                log_duration_predictions,
-                (duration_targets.float() + 1).log()
-                ) * ~token_masks).mean()
+            # loss_dict['Log_Duration'] = (self.criterion_dict['MSE'](
+            #     log_duration_predictions,
+            #     (duration_targets.float() + 1).log()
+            #     ) * ~token_masks).mean()            
+            loss_dict['Log_Duration'] = log_duration_predictions.sum()
             loss_dict['KL'] = self.criterion_dict['KL'](
-                posterior_encodings_p= posterior_encodings_p,
-                log_stds_q= log_stds_q,
+                features= features,
                 means_p= means_p,
                 log_stds_p= log_stds_p,
                 feature_masks= (~feature_masks).unsqueeze(1).float()
@@ -299,9 +297,7 @@ class Trainer:
 
         predictions, noises, epsilons, \
         duration_targets, log_duration_predictions, \
-        encodings, means_p, log_stds_p, \
-        posterior_encodings, means_q, log_stds_q, \
-        posterior_encodings_p = self.model(
+        encodings, means_p, log_stds_p, = self.model(
             tokens= tokens,
             token_lengths= token_lengths,
             features= features,
@@ -322,14 +318,13 @@ class Trainer:
             noises,
             epsilons
             ).mean()
-
-        loss_dict['Log_Duration'] = (self.criterion_dict['MSE'](
-            log_duration_predictions,
-            (duration_targets.float() + 1).log()
-            ) * ~token_masks).mean()
+        # loss_dict['Log_Duration'] = (self.criterion_dict['MSE'](
+        #     log_duration_predictions,
+        #     (duration_targets.float() + 1).log()
+        #     ) * ~token_masks).mean()
+        loss_dict['Log_Duration'] = log_duration_predictions.sum()
         loss_dict['KL'] = self.criterion_dict['KL'](
-            posterior_encodings_p= posterior_encodings_p,
-            log_stds_q= log_stds_q,
+            features= features,
             means_p= means_p,
             log_stds_p= log_stds_p,
             feature_masks= (~feature_masks).unsqueeze(1).float()
@@ -342,9 +337,7 @@ class Trainer:
         return \
             predictions, noises, epsilons, \
             duration_targets, log_duration_predictions, \
-            encodings, means_p, log_stds_p, \
-            posterior_encodings, means_q, log_stds_q, \
-            posterior_encodings_p
+            encodings, means_p, log_stds_p
 
     def Evaluation_Epoch(self):
         logging.info('(Steps: {}) Start evaluation in GPU {}.'.format(self.steps, self.gpu_id))
@@ -358,9 +351,7 @@ class Trainer:
             ):
             predictions, noises, epsilons, \
             duration_targets, log_duration_predictions, \
-            encodings, means_p, log_stds_p, \
-            posterior_encodings, means_q, log_stds_q, \
-            posterior_encodings_p = self.Evaluation_Step(
+            encodings, means_p, log_stds_p = self.Evaluation_Step(
                 tokens= tokens,
                 token_lengths= token_lengths,
                 features= features,
@@ -390,14 +381,14 @@ class Trainer:
             
             duration_target = duration_targets[index, :token_lengths[index]]
             duration_target = torch.arange(duration_target.size(0)).repeat_interleave(duration_target.cpu()).numpy()
-            duration_prediction = (torch.exp(log_duration_predictions[index, :token_lengths[index]]) - 1).clamp(3, 50).ceil().long()
-            duration_prediction = torch.arange(duration_prediction.size(0)).repeat_interleave(duration_prediction.cpu()).numpy()
+            # duration_prediction = (torch.exp(log_duration_predictions[index, :token_lengths[index]]) - 1).clamp(3, 50).ceil().long()
+            # duration_prediction = torch.arange(duration_prediction.size(0)).repeat_interleave(duration_prediction.cpu()).numpy()
             
             image_dict = {
                 'Diffusion/Noise': (noises[index, :audio_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),
                 'Diffusion/Epsilon': (epsilons[index, :audio_lengths[index]].cpu().numpy(), None, 'auto', None, None, None),                
                 'Duration/Target': (duration_target[:feature_lengths[index]], None, 'auto', (0, features.size(2)), (0, tokens.size(1)), None),
-                'Duration/Prediction': (duration_prediction[:feature_lengths[index]], None, 'auto', (0, features.size(2)), (0, tokens.size(1)), None),
+                # 'Duration/Prediction': (duration_prediction[:feature_lengths[index]], None, 'auto', (0, features.size(2)), (0, tokens.size(1)), None),
                 }
             audio_dict = {
                 'Audio/Target': (target_audio, self.hp.Sound.Sample_Rate),
@@ -433,11 +424,11 @@ class Trainer:
                         sample_rate= self.hp.Sound.Sample_Rate,
                         caption= 'Target_Audio'
                         ),
-                    'Evaluation.Audio.Prediction': wandb.Audio(
-                        prediction_audio,
-                        sample_rate= self.hp.Sound.Sample_Rate,
-                        caption= 'Prediction_Audio'
-                        ),
+                    # 'Evaluation.Audio.Prediction': wandb.Audio(
+                    #     prediction_audio,
+                    #     sample_rate= self.hp.Sound.Sample_Rate,
+                    #     caption= 'Prediction_Audio'
+                    #     ),
                     },
                     step= self.steps,
                     commit= True
@@ -458,7 +449,8 @@ class Trainer:
             )
         predictions = predictions.clamp(-1.0, 1.0)
 
-        durations = (log_duration_predictions.exp() - 1).clamp(0, 50).ceil().long()
+        # durations = (log_duration_predictions.exp() - 1).clamp(0, 50).ceil().long()
+        durations = log_duration_predictions.exp().ceil().long().squeeze(1)
         feature_lengths = [
             int(duration[:token_length].sum())
             for duration, token_length in zip(durations, token_lengths)

@@ -1,8 +1,8 @@
 /.ipynb_checkpoints
 /__pycache__
 /Modules/__pycache__
-/results
-/results_vits
+/results*
+/vits
 /inference_wav
 /wandb
 *.pyc

@@ -156,8 +156,9 @@ class Denoiser(torch.nn.Module):
     def __init__(self, hyper_parameters: Namespace):
         super().__init__()
         self.hp = hyper_parameters
-
         assert math.prod(self.hp.Diffusion.Denoiser.Stride) == self.hp.Sound.Frame_Shift
+
+        feature_size = self.hp.Sound.N_FFT // 2 + 1
 
         self.prenet = torch.nn.Sequential(
             Lambda(lambda x: x.unsqueeze(1)),
@@ -195,7 +196,7 @@ class Denoiser(torch.nn.Module):
         self.blocks = torch.nn.ModuleList([
             Residual_Block(
                 channels= self.hp.Diffusion.Size,
-                condition_channels= self.hp.Encoder.Size,
+                condition_channels= feature_size,
                 kernel_size= self.hp.Diffusion.Denoiser.Kernel_Size,
                 dilation= 2 ** (index % self.hp.Diffusion.Denoiser.Dilation_Cycle),
                 strides= self.hp.Diffusion.Denoiser.Stride,
