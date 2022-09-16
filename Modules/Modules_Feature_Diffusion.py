@@ -26,18 +26,14 @@ class Model_Test(torch.nn.Module):
         tokens: torch.Tensor,
         token_lengths: torch.Tensor,
         features: torch.FloatTensor= None,
-        feature_lengths: torch.Tensor= None,
-        audios: torch.FloatTensor= None,
-        audio_lengths: torch.Tensor= None
+        feature_lengths: torch.Tensor= None
         ):
         if not features is None and not feature_lengths is None:    # train
             return self.Train(
                 tokens= tokens,
                 token_lengths= token_lengths,
                 features= features,
-                feature_lengths= feature_lengths,
-                audios= audios,
-                audio_lengths= audio_lengths
+                feature_lengths= feature_lengths
                 )
         else:   #  inference
             return self.Inference(
@@ -50,9 +46,7 @@ class Model_Test(torch.nn.Module):
         tokens: torch.Tensor,
         token_lengths: torch.Tensor,
         features: torch.FloatTensor,
-        feature_lengths: torch.Tensor,
-        audios: torch.FloatTensor,
-        audio_lengths: torch.Tensor
+        feature_lengths: torch.Tensor
         ):
         encodings, means_p, log_stds_p, token_masks = self.encoder(tokens, token_lengths)   # [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t]
         feature_masks = (~Mask_Generate(
@@ -86,18 +80,19 @@ class Model_Test(torch.nn.Module):
             lengths= feature_lengths
             )
         encodings_slice = encodings_slice.permute(0, 2, 1)
-        audios_slice, _ = self.segment(
-            patterns= audios,
-            segment_size= self.hp.Train.Segment_Size * self.hp.Sound.Frame_Shift,
-            offsets= offsets * self.hp.Sound.Frame_Shift
+        features_slice, _ = self.segment(
+            patterns= features.permute(0, 2, 1),
+            segment_size= self.hp.Train.Segment_Size,
+            offsets= offsets
             )
+        features_slice = features_slice.permute(0, 2, 1)
         decodings_slice, feature_masks = self.decoder(
             encodings= encodings_slice,
             lengths= torch.full_like(feature_lengths, fill_value= encodings_slice.size(2))
             )
         predictions_slice, noises, epsilons = self.diffusion(
             conditions= decodings_slice,
-            audios= audios_slice
+            features= features_slice
             )
 
         return predictions_slice, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations

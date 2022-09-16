@@ -96,7 +96,7 @@ class Dataset(torch.utils.data.Dataset):
         feature = pattern_dict[self.feature_type]
         feature = (feature - self.feature_min) / (self.feature_max - self.feature_min) * 2.0 - 1.0
 
-        return token, feature, pattern_dict['Audio']
+        return token, feature
 
     def __len__(self):
         return len(self.patterns)
@@ -138,23 +138,19 @@ class Collater:
         self.token_dict = token_dict
 
     def __call__(self, batch):
-        tokens, features, audios = zip(*batch)
+        tokens, features = zip(*batch)
         token_lengths = np.array([token.shape[0] for token in tokens])
         feature_lengths = np.array([feature.shape[0] for feature in features])
-        audio_lengths = np.array([audio.shape[0] for audio in audios])
 
         tokens = Token_Stack(tokens, self.token_dict)
         features = Feature_Stack(features)
-        audios = Audio_Stack(audios)
 
         tokens = torch.LongTensor(tokens)   # [Batch, Token_t]
         token_lengths = torch.LongTensor(token_lengths)   # [Batch]
         features = torch.FloatTensor(features).permute(0, 2, 1)   # [Batch, Feature_d, Featpure_t]
         feature_lengths = torch.LongTensor(feature_lengths)   # [Batch]
-        audios = torch.FloatTensor(audios)  # [Batch, Audio_t]
-        audio_lengths = torch.LongTensor(audio_lengths) # [Batch]
 
-        return tokens, token_lengths, features, feature_lengths, audios, audio_lengths
+        return tokens, token_lengths, features, feature_lengths
 
 class Inference_Collater:
     def __init__(self,

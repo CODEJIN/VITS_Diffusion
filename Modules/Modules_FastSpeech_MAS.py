@@ -5,7 +5,6 @@ import math
 from numba import jit
 from typing import Optional, List, Dict, Tuple, Union
 
-from .Diffusion import Diffusion
 from .Layer import Linear, Conv1d, Lambda
 
 class Model_Test(torch.nn.Module):
@@ -16,7 +15,6 @@ class Model_Test(torch.nn.Module):
         self.encoder = Encoder(self.hp)
         self.variance_predictor_block = Variance_Predictor_Block(self.hp)
         self.decoder = Decoder(self.hp)
-        self.diffusion = Diffusion(self.hp)
         
         self.maximum_path_generator = Maximum_Path_Generator()
         self.segment = Segment()
@@ -26,18 +24,14 @@ class Model_Test(torch.nn.Module):
         tokens: torch.Tensor,
         token_lengths: torch.Tensor,
         features: torch.FloatTensor= None,
-        feature_lengths: torch.Tensor= None,
-        audios: torch.FloatTensor= None,
-        audio_lengths: torch.Tensor= None
+        feature_lengths: torch.Tensor= None
         ):
         if not features is None and not feature_lengths is None:    # train
             return self.Train(
                 tokens= tokens,
                 token_lengths= token_lengths,
                 features= features,
-                feature_lengths= feature_lengths,
-                audios= audios,
-                audio_lengths= audio_lengths
+                feature_lengths= feature_lengths
                 )
         else:   #  inference
             return self.Inference(
@@ -50,9 +44,7 @@ class Model_Test(torch.nn.Module):
         tokens: torch.Tensor,
         token_lengths: torch.Tensor,
         features: torch.FloatTensor,
-        feature_lengths: torch.Tensor,
-        audios: torch.FloatTensor,
-        audio_lengths: torch.Tensor
+        feature_lengths: torch.Tensor
         ):
         encodings, means_p, log_stds_p, token_masks = self.encoder(tokens, token_lengths)   # [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t]
         feature_masks = (~Mask_Generate(
@@ -86,21 +78,18 @@ class Model_Test(torch.nn.Module):
             lengths= feature_lengths
             )
         encodings_slice = encodings_slice.permute(0, 2, 1)
-        audios_slice, _ = self.segment(
-            patterns= audios,
-            segment_size= self.hp.Train.Segment_Size * self.hp.Sound.Frame_Shift,
-            offsets= offsets * self.hp.Sound.Frame_Shift
+        features_slice, _ = self.segment(
+            patterns= features.permute(0, 2, 1),
+            segment_size= self.hp.Train.Segment_Size,
+            offsets= offsets
             )
-        decodings_slice, feature_masks = self.decoder(
+        features_slice = features_slice.permute(0, 2, 1)
+        predictions_slice, feature_masks = self.decoder(
             encodings= encodings_slice,
             lengths= torch.full_like(feature_lengths, fill_value= encodings_slice.size(2))
             )
-        predictions_slice, noises, epsilons = self.diffusion(
-            conditions= decodings_slice,
-            audios= audios_slice
-            )
 
-        return predictions_slice, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations
+        return predictions_slice, features_slice, log_duration_predictions, means_p, log_stds_p, durations
 
     def Inference(
         self,
@@ -112,15 +101,12 @@ class Model_Test(torch.nn.Module):
             encodings= encodings
             )
 
-        decodings, feature_masks = self.decoder(
+        predictions, feature_masks = self.decoder(
             encodings= encodings,
             lengths= ((log_duration_predictions.exp() - 1).clip(0, 50).ceil()).sum(dim= 1).long()
             )
-        predictions, noises, epsilons = self.diffusion(
-            conditions= decodings
-            )
 
-        return predictions, None, None, log_duration_predictions, None, None, None
+        return predictions, None, log_duration_predictions, None, None, None
 
 
 class Encoder(torch.nn.Module): 
@@ -219,6 +205,11 @@ class Decoder(torch.nn.Sequential):
         ):
         super().__init__()
         self.hp = hyper_parameters
+
+        if self.hp.Feature_Type == 'Mel':
+            feature_size = self.hp.Sound.Mel_Dim
+        elif self.hp.Feature_Type == 'Spectrogram':
+            feature_size = self.hp.Sound.N_FFT // 2 + 1
         
         self.positional_encoding = Periodic_Positional_Encoding(
             period= self.hp.Encoder.Transformer.Positional_Encoding_Period,
@@ -237,6 +228,12 @@ class Decoder(torch.nn.Sequential):
             for index in range(self.hp.Encoder.Transformer.Stack)
             ])
 
+        self.projection = torch.nn.Conv1d(
+            in_channels= self.hp.Encoder.Size,
+            out_channels= feature_size,
+            kernel_size= 1,
+            )
+
     def forward(
         self,
         encodings: torch.Tensor,
@@ -250,8 +247,10 @@ class Decoder(torch.nn.Sequential):
         x = self.positional_encoding(encodings) * masks
         for block in self.blocks:
             x = block(x, lengths)
+
+        x = self.projection(x) * masks
         
-        return x * masks, masks
+        return x, masks
 
 
 class FFT_Block(torch.nn.Module):

@@ -89,8 +89,8 @@ Decoder:
             Dropout_Rate: 0.1
 
 Diffusion:
-    Size: 64
-    Max_Step: 100
+    Size: 256
+    Max_Step: 1000
     Kernel_Size: 5
     Stack: 20
 
@@ -132,7 +132,7 @@ Train:
             Min: 10
             Max: 200
     Num_Workers: 0
-    Batch_Size: 8
+    Batch_Size: 64
     Learning_Rate:
         Initial: 2.0e-4
         Warmup_Step: 4000
@@ -150,7 +150,7 @@ Train:
     Logging_Interval: 1
     Evaluation_Interval: 1000
     Inference_Interval: 1000
-    Initial_Inference: false
+    Initial_Inference: true
     Inference_in_Train:
         Text: [
             '최근 디퓨전 기반의 생성모델이 다수 발표되고 있습니다.',
@@ -165,8 +165,8 @@ Checkpoint_Path: './results/Checkpoint'
 Log_Path: './results/Log'
 
 Weights_and_Biases:
-    Use: true
-    # Use: false
+    # Use: true
+    Use: false
     Project: 'VITS_Diffusion'
     Entity: 'codejin'
     Name: 'Audio_Diffusion'

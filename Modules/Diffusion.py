@@ -2,6 +2,8 @@ import torch
 import math
 from argparse import Namespace
 from typing import Optional, List, Dict, Union
+from tqdm import tqdm
+
 from .Layer import Conv1d, ConvTranspose2d, Lambda
 
 class Diffusion(torch.nn.Module):
@@ -17,7 +19,7 @@ class Diffusion(torch.nn.Module):
             )
 
         self.timesteps = self.hp.Diffusion.Max_Step
-        betas = torch.linspace(1e-4, 0.02, self.timesteps)
+        betas = torch.linspace(1e-4, 0.06, self.timesteps)
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, axis= 0)
         alphas_cumprod_prev = torch.cat([torch.tensor([1.0]), alphas_cumprod[:-1]])
@@ -42,9 +44,9 @@ class Diffusion(torch.nn.Module):
         audios: torch.Tensor= None
         ):
         '''
-        conditions: [Batch, Feature_d, Feature_t]
+        conditions: [Batch, Enc_d, Feature_t]
         audios: [Batch, Audio_t]
-        Audio_t = Feature_t * Hop size
+        Audio_t = Feature_t * Hop_size
         '''
         if not audios is None:    # train
             diffusion_steps = torch.randint(
@@ -75,7 +77,11 @@ class Diffusion(torch.nn.Module):
             size= (conditions.size(0), conditions.size(2) * self.hp.Sound.Frame_Shift),
             device= conditions.device
             )
-        for diffusion_step in reversed(range(self.timesteps)):
+        for diffusion_step in tqdm(
+            reversed(range(self.timesteps)),
+            desc= '[Diffusion]',
+            total= self.timesteps
+            ):
             audios = self.P_Sampling(
                 audios= audios,
                 conditions= conditions,
@@ -113,7 +119,7 @@ class Diffusion(torch.nn.Module):
         diffusion_steps: torch.Tensor
         ):
         noised_predictions = self.denoiser(
-            x= audios,
+            audios= audios,
             conditions= conditions,
             diffusion_steps= diffusion_steps
             )
@@ -144,7 +150,7 @@ class Diffusion(torch.nn.Module):
             noises * self.sqrt_one_minus_alphas_cumprod[diffusion_steps][:, None]
 
         epsilons = self.denoiser(
-            x= noised_audios,
+            audios= noised_audios,
             conditions= conditions,
             diffusion_steps= diffusion_steps
             )
@@ -156,9 +162,7 @@ class Denoiser(torch.nn.Module):
     def __init__(self, hyper_parameters: Namespace):
         super().__init__()
         self.hp = hyper_parameters
-        assert math.prod(self.hp.Diffusion.Denoiser.Stride) == self.hp.Sound.Frame_Shift
-
-        feature_size = self.hp.Sound.N_FFT // 2 + 1
+        assert math.prod(self.hp.Diffusion.Stride) == self.hp.Sound.Frame_Shift
 
         self.prenet = torch.nn.Sequential(
             Lambda(lambda x: x.unsqueeze(1)),
@@ -196,13 +200,13 @@ class Denoiser(torch.nn.Module):
         self.blocks = torch.nn.ModuleList([
             Residual_Block(
                 channels= self.hp.Diffusion.Size,
-                condition_channels= feature_size,
-                kernel_size= self.hp.Diffusion.Denoiser.Kernel_Size,
-                dilation= 2 ** (index % self.hp.Diffusion.Denoiser.Dilation_Cycle),
-                strides= self.hp.Diffusion.Denoiser.Stride,
-                leaky_relu_slope= self.hp.Diffusion.Denoiser.Leaky_ReLU_Slope,
+                condition_channels= self.hp.Encoder.Size,
+                kernel_size= self.hp.Diffusion.Kernel_Size,
+                dilation= 2 ** (index % self.hp.Diffusion.Dilation_Cycle),
+                strides= self.hp.Diffusion.Stride,
+                leaky_relu_slope= self.hp.Diffusion.Leaky_ReLU_Slope,
                 )
-            for index in range(self.hp.Diffusion.Denoiser.Stack)
+            for index in range(self.hp.Diffusion.Stack)
             ])
 
         self.projection = torch.nn.Sequential(
@@ -220,37 +224,37 @@ class Denoiser(torch.nn.Module):
                 ),
             Lambda(lambda x: x.squeeze(1))
             )
-        self.projection[-2].weight.data.zero_()
-        self.projection[-2].bias.data.zero_()
+        torch.nn.init.zeros_(self.projection[-2].weight)    # This is key factor....
+        torch.nn.init.zeros_(self.projection[-2].bias)    # This is key factor....
 
     def forward(
         self,
-        x: torch.Tensor,
+        audios: torch.Tensor,
         conditions: torch.Tensor,
         diffusion_steps: torch.Tensor
         ):
         '''
         x: [Batch, Audio_t]
-        conditions: Feautre, [Batch, Feature_d, Feature_t]
+        conditions: Feautre, [Batch, Enc_d, Feature_t]
         diffusion_steps: [Batch]
         '''
-        x = self.prenet(x)  # [Batch, Diffusion_d, Audio_t]
+        audios = self.prenet(audios)  # [Batch, Diffusion_d, Audio_t]
         diffusion_steps = self.diffusion_embedding(diffusion_steps)   # [Batch, Diffusion_d, 1]
         diffusion_steps = self.embedding_ffn(diffusion_steps) # [Batch, Diffusion_d, 1]
         
         skips_list = []
         for block in self.blocks:
-            x, skips = block(
-                x= x,
+            audios, skips = block(
+                x= audios,
                 conditions= conditions,
                 diffusion_steps= diffusion_steps
                 )   # [Batch, Diffusion, Audio_t], [Batch, Diffusion, Audio_t]
             skips_list.append(skips)
 
-        x = torch.stack(skips_list, dim= 0).sum(dim= 0) / math.sqrt(self.hp.Diffusion.Denoiser.Stack)
-        x = self.projection(x)  # [Batch, Audio_t]
+        audios = torch.stack(skips_list, dim= 0).sum(dim= 0) / math.sqrt(self.hp.Diffusion.Stack)
+        audios = self.projection(audios)  # [Batch, Audio_t]
 
-        return x
+        return audios
 
 class Diffusion_Embedding(torch.nn.Module):
     def __init__(
@@ -331,7 +335,7 @@ class Residual_Block(torch.nn.Module):
         ):
         '''
         x: [Batch, Diffusion_d, Audio_t]
-        conditions: Feautre, [Batch, Feature_d, Feature_t]
+        conditions: Feautre, [Batch, Enc_d, Feature_t]
         diffusion_steps: [Batch, Diffusion_d, 1]
         '''
         residuals = x

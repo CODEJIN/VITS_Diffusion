@@ -5,7 +5,6 @@ import math
 from numba import jit
 from typing import Optional, List, Dict, Tuple, Union
 
-from .Diffusion import Diffusion
 from .Layer import Linear, Conv1d, Lambda
 
 class Model_Test(torch.nn.Module):
@@ -16,9 +15,6 @@ class Model_Test(torch.nn.Module):
         self.encoder = Encoder(self.hp)
         self.variance_predictor_block = Variance_Predictor_Block(self.hp)
         self.decoder = Decoder(self.hp)
-        self.diffusion = Diffusion(self.hp)
-        
-        self.maximum_path_generator = Maximum_Path_Generator()
         self.segment = Segment()
 
     def forward(
@@ -27,8 +23,7 @@ class Model_Test(torch.nn.Module):
         token_lengths: torch.Tensor,
         features: torch.FloatTensor= None,
         feature_lengths: torch.Tensor= None,
-        audios: torch.FloatTensor= None,
-        audio_lengths: torch.Tensor= None
+        durations: torch.Tensor= None
         ):
         if not features is None and not feature_lengths is None:    # train
             return self.Train(
@@ -36,8 +31,7 @@ class Model_Test(torch.nn.Module):
                 token_lengths= token_lengths,
                 features= features,
                 feature_lengths= feature_lengths,
-                audios= audios,
-                audio_lengths= audio_lengths
+                durations= durations
                 )
         else:   #  inference
             return self.Inference(
@@ -51,32 +45,11 @@ class Model_Test(torch.nn.Module):
         token_lengths: torch.Tensor,
         features: torch.FloatTensor,
         feature_lengths: torch.Tensor,
-        audios: torch.FloatTensor,
-        audio_lengths: torch.Tensor
+        durations: torch.Tensor
         ):
-        encodings, means_p, log_stds_p, token_masks = self.encoder(tokens, token_lengths)   # [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t]
-        feature_masks = (~Mask_Generate(
-            lengths= feature_lengths,
-            max_length= torch.ones_like(features[0, 0]).sum()
-            )).unsqueeze(1).float()
-
-        with torch.no_grad():
-            # negative cross-entropy
-            stds_p_sq_r = torch.exp(-2 * log_stds_p) # [Batch, Enc_d, Token_t]
-            neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi) - log_stds_p, [1], keepdim=True) # [Batch, 1, Token_t]
-            neg_cent2 = torch.matmul(-0.5 * (features ** 2).permute(0, 2, 1), stds_p_sq_r) # [Batch, Feature_t, Enc_d] x [Batch, Enc_d, Token_t] -> [Batch, Feature_t, Token_t]
-            neg_cent3 = torch.matmul(features.permute(0, 2, 1), (means_p * stds_p_sq_r)) # [Batch, Feature_t, Enc_d] x [b, Enc_d, Token_t] -> [Batch, Feature_t, Token_t]
-            neg_cent4 = torch.sum(-0.5 * (means_p ** 2) * stds_p_sq_r, [1], keepdim=True) # [Batch, 1, Token_t]
-            neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4    # [Batch, Feature_t, Token_t]
-
-            attention_masks = token_masks * feature_masks.permute(0, 2, 1)  # [Batch, 1, Token_t] x [Batch, Feature_t, 1] -> [Batch, Feature_t, Token_t]
-            attentions = self.maximum_path_generator(neg_cent, attention_masks).detach()
-            durations = attentions.sum(dim= 1).long()    # [Batch, Token_t]        
-
-        encodings, means_p, log_stds_p, log_duration_predictions = self.variance_predictor_block(
+        encodings, token_masks = self.encoder(tokens, token_lengths)   # [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t]
+        encodings, log_duration_predictions = self.variance_predictor_block(
             encodings= encodings,
-            means_p= means_p,
-            log_stds_p= log_stds_p,
             durations= durations
             )
 
@@ -86,41 +59,35 @@ class Model_Test(torch.nn.Module):
             lengths= feature_lengths
             )
         encodings_slice = encodings_slice.permute(0, 2, 1)
-        audios_slice, _ = self.segment(
-            patterns= audios,
-            segment_size= self.hp.Train.Segment_Size * self.hp.Sound.Frame_Shift,
-            offsets= offsets * self.hp.Sound.Frame_Shift
+        features_slice, _ = self.segment(
+            patterns= features.permute(0, 2, 1),
+            segment_size= self.hp.Train.Segment_Size,
+            offsets= offsets
             )
-        decodings_slice, feature_masks = self.decoder(
+        features_slice = features_slice.permute(0, 2, 1)
+        predictions_slice, feature_masks = self.decoder(
             encodings= encodings_slice,
             lengths= torch.full_like(feature_lengths, fill_value= encodings_slice.size(2))
             )
-        predictions_slice, noises, epsilons = self.diffusion(
-            conditions= decodings_slice,
-            audios= audios_slice
-            )
 
-        return predictions_slice, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations
+        return predictions_slice, features_slice, log_duration_predictions
 
     def Inference(
         self,
         tokens: torch.Tensor,
         token_lengths: torch.Tensor,
         ):
-        encodings, _, _, token_masks = self.encoder(tokens, token_lengths)   # [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t]
-        encodings, _, _, log_duration_predictions = self.variance_predictor_block(
+        encodings, token_masks = self.encoder(tokens, token_lengths)   # [Batch, Enc_d, Token_t], [Batch, Enc_d, Token_t]
+        encodings, log_duration_predictions = self.variance_predictor_block(
             encodings= encodings
             )
 
-        decodings, feature_masks = self.decoder(
+        predictions, feature_masks = self.decoder(
             encodings= encodings,
             lengths= ((log_duration_predictions.exp() - 1).clip(0, 50).ceil()).sum(dim= 1).long()
             )
-        predictions, noises, epsilons = self.diffusion(
-            conditions= decodings
-            )
 
-        return predictions, None, None, log_duration_predictions, None, None, None
+        return predictions, None, log_duration_predictions
 
 
 class Encoder(torch.nn.Module): 
@@ -180,16 +147,6 @@ class Encoder(torch.nn.Module):
             for index in range(self.hp.Encoder.Transformer.Stack)
             ])
 
-        self.projection = torch.nn.Sequential(
-            torch.nn.Mish(),
-            Conv1d(
-                in_channels= self.hp.Encoder.Size,
-                out_channels= feature_size * 2,
-                kernel_size= 1,
-                w_init_gain= 'linear'
-                )
-            )
-
     def forward(
         self,
         tokens: torch.Tensor,
@@ -208,9 +165,7 @@ class Encoder(torch.nn.Module):
         for block in self.blocks:
             x = block(x, lengths)
 
-        means, log_stds = (self.projection(x * masks) * masks).chunk(chunks= 2, dim= 1)
-
-        return x, means, log_stds, masks
+        return x, masks
 
 class Decoder(torch.nn.Sequential):
     def __init__(
@@ -219,6 +174,11 @@ class Decoder(torch.nn.Sequential):
         ):
         super().__init__()
         self.hp = hyper_parameters
+
+        if self.hp.Feature_Type == 'Mel':
+            feature_size = self.hp.Sound.Mel_Dim
+        elif self.hp.Feature_Type == 'Spectrogram':
+            feature_size = self.hp.Sound.N_FFT // 2 + 1
         
         self.positional_encoding = Periodic_Positional_Encoding(
             period= self.hp.Encoder.Transformer.Positional_Encoding_Period,
@@ -237,6 +197,12 @@ class Decoder(torch.nn.Sequential):
             for index in range(self.hp.Encoder.Transformer.Stack)
             ])
 
+        self.projection = torch.nn.Conv1d(
+            in_channels= self.hp.Encoder.Size,
+            out_channels= feature_size,
+            kernel_size= 1,
+            )
+
     def forward(
         self,
         encodings: torch.Tensor,
@@ -250,8 +216,10 @@ class Decoder(torch.nn.Sequential):
         x = self.positional_encoding(encodings) * masks
         for block in self.blocks:
             x = block(x, lengths)
+
+        x = self.projection(x) * masks
         
-        return x * masks, masks
+        return x, masks
 
 
 class FFT_Block(torch.nn.Module):
@@ -365,8 +333,6 @@ class Variance_Predictor_Block(torch.nn.Module):
     def forward(
         self,
         encodings: torch.Tensor,
-        means_p: torch.Tensor= None,
-        log_stds_p: torch.Tensor= None,
         durations: torch.Tensor= None
         ):
         '''
@@ -383,19 +349,8 @@ class Variance_Predictor_Block(torch.nn.Module):
             encodings= encodings,
             durations= durations
             )
-        if not means_p is None:
-            means_p = self.length_regulator(
-                encodings= means_p,
-                durations= durations
-                )
-        if not log_stds_p is None:
-            log_stds_p = self.length_regulator(
-                encodings= log_stds_p,
-                durations= durations
-                )
-
         
-        return encodings, means_p, log_stds_p, log_duration_predictions
+        return encodings, log_duration_predictions
 
 class Variance_Predictor(torch.nn.Sequential): 
     def __init__(
@@ -532,57 +487,6 @@ class Periodic_Positional_Encoding(torch.nn.Module):
         pe = pe.repeat(1, 1, math.ceil(x.size(2) / pe.size(2))) 
         return pe[:, :, :x.size(2)]
 
-class Maximum_Path_Generator(torch.nn.Module):
-    def forward(self, neg_cent, mask):
-        '''
-        x: [Batch, Feature_t, Token_t]
-        mask: [Batch, Feature_t, Token_t]
-        '''
-        neg_cent *= mask
-        device, dtype = neg_cent.device, neg_cent.dtype
-        neg_cent = neg_cent.data.cpu().numpy().astype(np.float32)
-        mask = mask.data.cpu().numpy()
-
-        token_lengths = mask.sum(axis= 2)[:, 0].astype('int32')   # [Batch]
-        feature_lengths = mask.sum(axis= 1)[:, 0].astype('int32')   # [Batch]
-
-        paths = self.calc_paths(neg_cent, token_lengths, feature_lengths)
-
-        return torch.from_numpy(paths).to(device= device, dtype= dtype)
-
-    def calc_paths(self, neg_cent, token_lengths, feature_lengths):
-        return np.stack([
-            Maximum_Path_Generator.calc_path(x, token_length, feature_length)
-            for x, token_length, feature_length in zip(neg_cent, token_lengths, feature_lengths)
-            ], axis= 0)
-
-    @staticmethod
-    @jit(nopython=True)
-    def calc_path(x, token_length, feature_length):
-        path = np.zeros_like(x, dtype= np.int32)
-        for feature_index in range(feature_length):
-            for token_index in range(max(0, token_length + feature_index - feature_length), min(token_length, feature_index + 1)):
-                if feature_index == token_index:
-                    current_q = -1e+9
-                else:
-                    current_q = x[feature_index - 1, token_index]   # Stayed current token
-                if token_index == 0:
-                    if feature_index == 0:
-                        prev_q = 0.0
-                    else:
-                        prev_q = -1e+9
-                else:
-                    prev_q = x[feature_index - 1, token_index - 1]  # Moved to next token
-                x[feature_index, token_index] = x[feature_index, token_index] + max(prev_q, current_q)
-
-        token_index = token_length - 1
-        for feature_index in range(feature_length - 1, -1, -1):
-            path[feature_index, token_index] = 1
-            if token_index != 0 and token_index == feature_index or x[feature_index - 1, token_index] < x[feature_index - 1, token_index - 1]:
-                token_index = token_index - 1
-
-        return path
-
 def Mask_Generate(lengths: torch.Tensor, max_length: int= None):
     '''
     lengths: [Batch]
@@ -591,20 +495,3 @@ def Mask_Generate(lengths: torch.Tensor, max_length: int= None):
     max_length = max_length or torch.max(lengths)
     sequence = torch.arange(max_length)[None, :].to(lengths.device)
     return sequence >= lengths[:, None]    # [Batch, Time]
-
-
-def MLE_Loss(
-    features: torch.Tensor,
-    feature_lengths: torch.Tensor,
-    means_p: torch.Tensor,
-    log_stds_p: torch.Tensor
-    ):
-    feature_masks = (~Mask_Generate(
-        lengths= feature_lengths,
-        max_length= torch.ones_like(features[0, 0]).sum()
-        )).unsqueeze(1).float()
-
-    loss = torch.sum(log_stds_p) + 0.5 * torch.sum(torch.exp(-2 * log_stds_p) * ((features - means_p)**2)) # neg normal likelihood w/o the constant term
-    loss = loss / torch.sum(torch.ones_like(features) * feature_masks) # averaging across batch, channel and time axes
-    loss = loss + 0.5 * math.log(2 * math.pi) # add the remaining constant term
-    return loss
