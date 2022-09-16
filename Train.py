@@ -473,7 +473,7 @@ class Trainer:
                 y= predictions,
                 n_fft= self.hp.Sound.N_FFT,
                 num_mels= self.hp.Sound.Mel_Dim,
-                sample_rate= self.hp.Sound.Sample_Rate,
+                sampling_rate= self.hp.Sound.Sample_Rate,
                 hop_size= self.hp.Sound.Frame_Shift,
                 win_size= self.hp.Sound.Frame_Length,
                 fmin= self.hp.Sound.Mel_F_Min,
