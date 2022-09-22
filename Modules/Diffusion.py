@@ -166,14 +166,17 @@ class Denoiser(torch.nn.Module):
 
         self.prenet = torch.nn.Sequential(
             Lambda(lambda x: x.unsqueeze(1)),
-            torch.nn.utils.weight_norm(Conv1d(
+            Conv1d(
                 in_channels= 1,
                 out_channels= self.hp.Diffusion.Size,
                 kernel_size= 1,
                 w_init_gain= 'relu'
-                )),
+                ),
+            torch.nn.BatchNorm1d(
+                num_features= self.hp.Diffusion.Size
+                ),
             torch.nn.ReLU()
-            )    
+            )
 
         self.diffusion_embedding = torch.nn.Sequential(
             Diffusion_Embedding(
@@ -210,12 +213,15 @@ class Denoiser(torch.nn.Module):
             ])
 
         self.projection = torch.nn.Sequential(
-            torch.nn.utils.weight_norm(Conv1d(
+            Conv1d(
                 in_channels= self.hp.Diffusion.Size,
                 out_channels= self.hp.Diffusion.Size,
                 kernel_size= 1,
                 w_init_gain= 'relu'
-                )),
+                ),
+            torch.nn.BatchNorm1d(
+                num_features= self.hp.Diffusion.Size
+                ),
             torch.nn.ReLU(),
             Conv1d(
                 in_channels= self.hp.Diffusion.Size,
@@ -290,35 +296,47 @@ class Residual_Block(torch.nn.Module):
             kernel_size= 1
             )
 
-        self.dilated_conv = torch.nn.utils.weight_norm(Conv1d(
-            in_channels= channels,
-            out_channels= channels * 2,
-            kernel_size= kernel_size,
-            dilation= dilation,
-            padding= dilation * (kernel_size - 1) // 2,
-            w_init_gain= 'gate'
-            ))
+        self.dilated_conv = torch.nn.Sequential(
+            Conv1d(
+                in_channels= channels,
+                out_channels= channels * 2,
+                kernel_size= kernel_size,
+                dilation= dilation,
+                padding= dilation * (kernel_size - 1) // 2,
+                w_init_gain= 'gate'
+                ),
+            torch.nn.BatchNorm1d(
+                num_features= channels * 2
+                )
+            )
 
         self.condition = torch.nn.Sequential()
         self.condition.add_module('Unsqueeze', Lambda(lambda x: x.unsqueeze(1)))
         for index, stride in enumerate(strides):
-            self.condition.add_module(f'Upsample_{index}', torch.nn.utils.weight_norm(ConvTranspose2d(
+            self.condition.add_module(f'Upsample_{index}', ConvTranspose2d(
                 in_channels= 1,
                 out_channels= 1,
                 kernel_size= (kernel_size, stride * 2),
                 stride= (1, stride),
-                padding= ((kernel_size - 1) // 2, stride // 2)
-                )))
+                padding= ((kernel_size - 1) // 2, stride // 2),
+                w_init_gain= 'leaky_relu'
+                ))
+            self.condition.add_module(f'Norm_{index}', torch.nn.BatchNorm2d(
+                num_features= 1
+                ))
             self.condition.add_module(f'LeakyReLU_{index}', torch.nn.LeakyReLU(
                 negative_slope= leaky_relu_slope
                 ))
         self.condition.add_module('Squeeze', Lambda(lambda x: x.squeeze(1)))
-        self.condition.add_module('Conv', torch.nn.utils.weight_norm(Conv1d(
+        self.condition.add_module('Conv', Conv1d(
             in_channels= condition_channels,
             out_channels= channels * 2,
             kernel_size= 1,
             w_init_gain= 'gate'
-            )))
+            ))
+        self.condition.add_module('Norm', torch.nn.BatchNorm1d(
+            num_features= channels * 2
+            ))
 
         self.projection = Conv1d(
             in_channels= channels,

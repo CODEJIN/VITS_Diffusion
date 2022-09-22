@@ -50,23 +50,6 @@ Duration_Predictor:
         Stack: 4
         Bins: 10
 
-
-
-Posterior_Encoder:
-    WaveNet:
-        Kernel_Size: 5
-        Dilation_Rate: 1        
-        Stack: 16
-        Dropout_Rate: 0.0
-
-Flow:
-    Flow_Stack: 4
-    WaveNet:
-        Kernel_Size: 5
-        Dilation_Rate: 1
-        Stack: 4
-        Dropout_Rate: 0.0
-
 Decoder:
     Prenet:
         Kernel_Size: 7
@@ -80,7 +63,7 @@ Decoder:
     Postnet:
         Kernel_Size: 7
     Transformer:
-        Positional_Encoding_Period: 90
+        Positional_Encoding_Period: 30
         Stack: 6
         Head: 8
         Dropout_Rate: 0.1
@@ -90,7 +73,7 @@ Decoder:
 
 Diffusion:
     Size: 64
-    Max_Step: 100
+    Max_Step: 1000
     Kernel_Size: 5
     Stack: 20
 
@@ -132,7 +115,7 @@ Train:
             Min: 10
             Max: 200
     Num_Workers: 0
-    Batch_Size: 8
+    Batch_Size: 32
     Learning_Rate:
         Initial: 2.0e-4
         Warmup_Step: 4000
@@ -142,14 +125,14 @@ Train:
         Epsilon: 1.0e-7
     Lambda:
         MLE: 1.0
-    Segment_Size: 128   # Feature based
+    Segment_Size: 32    # Feature based
     Weight_Decay: 1.0e-6
     Gradient_Norm: 1.0
     Max_Step: 100000
     Checkpoint_Save_Interval: 5000
     Logging_Interval: 1
     Evaluation_Interval: 1000
-    Inference_Interval: 1000
+    Inference_Interval: 5000
     Initial_Inference: false
     Inference_in_Train:
         Text: [
@@ -157,7 +140,7 @@ Train:
             '귀신중에는 개그맨이 있습니다.',
             ]
 
-Inference_Batch_Size: 1
+Inference_Batch_Size: 2
 Ignore_Stop: true   # If true, inference is always progressed until max iteration (Stop tokens are ignored).
 
 Inference_Path: './results/Inference'
@@ -174,7 +157,7 @@ Weights_and_Biases:
         Use: false
         Interval: 50000 # Unlike local, The capacity of WandB is small.
 
-Use_Mixed_Precision: false  # Don't use mixed precision in this model.
+Use_Mixed_Precision: true  # Don't use mixed precision in this model.
 Use_Multi_GPU: false
 Device: '0'
 # Use_Multi_GPU: true

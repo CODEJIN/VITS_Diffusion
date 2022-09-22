@@ -86,21 +86,27 @@ class Model_Test(torch.nn.Module):
             lengths= feature_lengths
             )
         encodings_slice = encodings_slice.permute(0, 2, 1)
+        features_slice, _ = self.segment(
+            patterns= features.permute(0, 2, 1),
+            segment_size= self.hp.Train.Segment_Size,
+            offsets= offsets
+            )
+        features_slice = features_slice.permute(0, 2, 1)
         audios_slice, _ = self.segment(
             patterns= audios,
             segment_size= self.hp.Train.Segment_Size * self.hp.Sound.Frame_Shift,
             offsets= offsets * self.hp.Sound.Frame_Shift
             )
-        decodings_slice, feature_masks = self.decoder(
+        decodings_slice, feature_predictions_slice, feature_masks = self.decoder(
             encodings= encodings_slice,
             lengths= torch.full_like(feature_lengths, fill_value= encodings_slice.size(2))
             )
-        predictions_slice, noises, epsilons = self.diffusion(
+        audio_predictions_slice, noises, epsilons = self.diffusion(
             conditions= decodings_slice,
             audios= audios_slice
             )
 
-        return predictions_slice, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations
+        return feature_predictions_slice, audio_predictions_slice, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations, features_slice        
 
     def Inference(
         self,
@@ -112,15 +118,15 @@ class Model_Test(torch.nn.Module):
             encodings= encodings
             )
 
-        decodings, feature_masks = self.decoder(
+        decodings, feature_predictions, feature_masks = self.decoder(
             encodings= encodings,
             lengths= ((log_duration_predictions.exp() - 1).clip(0, 50).ceil()).sum(dim= 1).long()
             )
-        predictions, noises, epsilons = self.diffusion(
+        audio_predictions, noises, epsilons = self.diffusion(
             conditions= decodings
             )
 
-        return predictions, None, None, log_duration_predictions, None, None, None
+        return feature_predictions, audio_predictions, None, None, log_duration_predictions, None, None, None
 
 
 class Encoder(torch.nn.Module): 
@@ -219,6 +225,11 @@ class Decoder(torch.nn.Sequential):
         ):
         super().__init__()
         self.hp = hyper_parameters
+
+        if self.hp.Feature_Type == 'Mel':
+            feature_size = self.hp.Sound.Mel_Dim
+        elif self.hp.Feature_Type == 'Spectrogram':
+            feature_size = self.hp.Sound.N_FFT // 2 + 1
         
         self.positional_encoding = Periodic_Positional_Encoding(
             period= self.hp.Encoder.Transformer.Positional_Encoding_Period,
@@ -237,6 +248,12 @@ class Decoder(torch.nn.Sequential):
             for index in range(self.hp.Encoder.Transformer.Stack)
             ])
 
+        self.projection = torch.nn.Conv1d(
+            in_channels= self.hp.Encoder.Size,
+            out_channels= feature_size,
+            kernel_size= 1,
+            )
+
     def forward(
         self,
         encodings: torch.Tensor,
@@ -250,8 +267,11 @@ class Decoder(torch.nn.Sequential):
         x = self.positional_encoding(encodings) * masks
         for block in self.blocks:
             x = block(x, lengths)
+
+        decodings = x * masks
+        predictions = self.projection(decodings) * masks
         
-        return x * masks, masks
+        return decodings, predictions, masks
 
 
 class FFT_Block(torch.nn.Module):

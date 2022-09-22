@@ -194,7 +194,7 @@ class Trainer:
         audio_lengths = audio_lengths.to(self.device, non_blocking=True)
 
         with torch.cuda.amp.autocast(enabled= self.hp.Use_Mixed_Precision):
-            predictions, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations = self.model(
+            feature_predictions_slice, audio_predictions, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations, target_features_slice = self.model(
                 tokens= tokens,
                 token_lengths= token_lengths,
                 features= features,
@@ -208,6 +208,10 @@ class Trainer:
                 max_length= tokens.size(1)
                 ).to(tokens.device)
 
+            loss_dict['Feature'] = self.criterion_dict['MAE'](
+                feature_predictions_slice,
+                target_features_slice
+                ).mean()
             loss_dict['Diffusion'] = self.criterion_dict['MAE'](
                 noises,
                 epsilons
@@ -225,6 +229,7 @@ class Trainer:
             
         self.optimizer.zero_grad()
         self.scaler.scale(
+            loss_dict['Feature'] +
             loss_dict['Diffusion'] +
             loss_dict['Log_Duration'] +
             self.hp.Train.Lambda.MLE * loss_dict['MLE']
@@ -298,7 +303,7 @@ class Trainer:
         audios = audios.to(self.device, non_blocking=True)
         audio_lengths = audio_lengths.to(self.device, non_blocking=True)
 
-        predictions, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations = self.model(
+        feature_predictions_slice, audio_predictions, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations, target_features_slice = self.model(
             tokens= tokens,
             token_lengths= token_lengths,
             features= features,
@@ -312,6 +317,10 @@ class Trainer:
             max_length= tokens.size(1)
             ).to(tokens.device)
 
+        loss_dict['Feature'] = self.criterion_dict['MAE'](
+            feature_predictions_slice,
+            target_features_slice
+            ).mean()
         loss_dict['Diffusion'] = self.criterion_dict['MAE'](
             noises,
             epsilons
@@ -331,7 +340,7 @@ class Trainer:
             loss = reduce_tensor(loss.data, self.num_gpus).item() if self.num_gpus > 1 else loss.item()
             self.scalar_dict['Evaluation']['Loss/{}'.format(tag)] += loss
 
-        return predictions, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations
+        return feature_predictions_slice, audio_predictions, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations, target_features_slice
 
     def Evaluation_Epoch(self):
         logging.info('(Steps: {}) Start evaluation in GPU {}.'.format(self.steps, self.gpu_id))
@@ -343,7 +352,7 @@ class Trainer:
             desc='[Evaluation]',
             total= math.ceil(len(self.dataloader_dict['Eval'].dataset) / self.hp.Train.Batch_Size / self.num_gpus)
             ):
-            predictions, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations = self.Evaluation_Step(
+            feature_predictions_slice, audio_predictions, noises, epsilons, log_duration_predictions, means_p, log_stds_p, durations, target_features_slice = self.Evaluation_Step(
                 tokens= tokens,
                 token_lengths= token_lengths,
                 features= features,
@@ -359,20 +368,21 @@ class Trainer:
                 }
             self.writer_dict['Evaluation'].add_scalar_dict(self.scalar_dict['Evaluation'], self.steps)
             self.writer_dict['Evaluation'].add_histogram_model(self.model, 'VITS_Diffusion', self.steps, delete_keywords=[])
-        
+
             index = np.random.randint(0, tokens.size(0))
             
             target_audio = audios[index, :feature_lengths[index] * self.hp.Sound.Frame_Shift]
             target_feature = (features[index, :, :feature_lengths[index]] + 1.0) / 2.0 * (self.feature_max - self.feature_min) + self.feature_min
 
             with torch.no_grad():
-                prediction_audio, *_ = self.model(
+                prediction_feature, prediction_audio, *_ = self.model(
                     tokens= tokens[index].unsqueeze(0).to(self.device),
                     token_lengths= token_lengths[index].unsqueeze(0).to(self.device)
                     )
+                prediction_feature = (prediction_feature.squeeze(0) + 1.0) / 2.0 * (self.feature_max - self.feature_min) + self.feature_min
                 prediction_audio = prediction_audio.clamp(-1.0, 1.0).squeeze(0)
             if self.hp.Feature_Type == 'Mel':
-                prediction_feature = mel_spectrogram(
+                prediction_feature_by_audio = mel_spectrogram(
                     y= prediction_audio.unsqueeze(0),
                     n_fft= self.hp.Sound.N_FFT,
                     num_mels= self.hp.Sound.Mel_Dim,
@@ -383,7 +393,7 @@ class Trainer:
                     fmax= self.hp.Sound.Mel_F_Max,
                     ).squeeze(0)
             elif self.hp.Feature_Type == 'Spectrogram':
-                prediction_feature = spectrogram(
+                prediction_feature_by_audio = spectrogram(
                     y= prediction_audio.unsqueeze(0),
                     n_fft= self.hp.Sound.N_FFT,
                     hop_size= self.hp.Sound.Frame_Shift,
@@ -398,6 +408,7 @@ class Trainer:
             image_dict = {
                 'Feature/Target': (target_feature.cpu().numpy(), None, 'auto', None, None, None),
                 'Feature/Prediction': (prediction_feature.cpu().numpy(), None, 'auto', None, None, None),
+                'Feature/Prediction_by_Audio': (prediction_feature_by_audio.cpu().numpy(), None, 'auto', None, None, None),
                 'Duration/Target': (duration_target[:feature_lengths[index]], None, 'auto', (0, features.size(2)), (0, tokens.size(1)), None),
                 'Duration/Prediction': (duration_prediction[:feature_lengths[index]], None, 'auto', (0, features.size(2)), (0, tokens.size(1)), None),
                 }
@@ -422,6 +433,7 @@ class Trainer:
                     data= {
                         'Evaluation.Feature.Target': wandb.Image(target_feature.cpu().numpy()),
                         'Evaluation.Feature.Prediction': wandb.Image(prediction_feature.cpu().numpy()),
+                        'Evaluation.Feature.Prediction_by_Audio': wandb.Image(prediction_feature_by_audio.cpu().numpy()),
                         'Evaluation.Duration': wandb.plot.line_series(
                             xs= np.arange(feature_lengths[index].cpu().numpy()),
                             ys= [
@@ -456,11 +468,12 @@ class Trainer:
         tokens = tokens.to(self.device, non_blocking=True)
         token_lengths = token_lengths.to(self.device, non_blocking=True)
         
-        predictions, _, _, log_duration_predictions, *_ = self.model(
+        feature_predictions, audio_predictions, _, _, log_duration_predictions, *_ = self.model(
             tokens= tokens,
             token_lengths= token_lengths
             )
-        predictions = predictions.clamp(-1.0, 1.0)
+        feature_predictions = (feature_predictions + 1.0) / 2.0 * (self.feature_max - self.feature_min) + self.feature_min
+        audio_predictions = audio_predictions.clamp(-1.0, 1.0)
         
         durations = (log_duration_predictions.exp() - 1).clamp(0, 50).ceil().long()
         feature_lengths = [
@@ -469,8 +482,8 @@ class Trainer:
             ]
 
         if self.hp.Feature_Type == 'Mel':
-            features = mel_spectrogram(
-                y= predictions,
+            feature_predictions_by_audio = mel_spectrogram(
+                y= audio_predictions,
                 n_fft= self.hp.Sound.N_FFT,
                 num_mels= self.hp.Sound.Mel_Dim,
                 sampling_rate= self.hp.Sound.Sample_Rate,
@@ -480,8 +493,8 @@ class Trainer:
                 fmax= self.hp.Sound.Mel_F_Max,
                 )
         elif self.hp.Feature_Type == 'Spectrogram':
-            features = spectrogram(
-                y= predictions,
+            feature_predictions_by_audio = spectrogram(
+                y= audio_predictions,
                 n_fft= self.hp.Sound.N_FFT,
                 hop_size= self.hp.Sound.Frame_Shift,
                 win_size= self.hp.Sound.Frame_Length,
@@ -504,6 +517,7 @@ class Trainer:
         for index, (
             prediction,
             feature,
+            feature_by_audio,
             duration,
             token_length,
             feature_length,
@@ -511,8 +525,9 @@ class Trainer:
             decomposed_text,
             file
             ) in enumerate(zip(
-            predictions.cpu().numpy(),
-            features.cpu().numpy(),
+            audio_predictions.cpu().numpy(),
+            feature_predictions.cpu().numpy(),
+            feature_predictions_by_audio.cpu().numpy(),
             durations,
             token_lengths.cpu().numpy(),
             feature_lengths,
@@ -521,17 +536,21 @@ class Trainer:
             files
             )):
             title = 'Text: {}'.format(text if len(text) < 90 else text[:90] + '…')
-            new_figure = plt.figure(figsize=(20, 5 * 4), dpi=100)
-            ax = plt.subplot2grid((4, 1), (0, 0))
+            new_figure = plt.figure(figsize=(20, 5 * 5), dpi=100)
+            ax = plt.subplot2grid((5, 1), (0, 0))
+            plt.imshow(feature[:, :feature_length], aspect='auto', origin='lower')
+            plt.title('Feature prediction    {}'.format(title))
+            plt.colorbar(ax= ax)
+            ax = plt.subplot2grid((5, 1), (1, 0))
+            plt.imshow(feature_by_audio[:, :feature_length], aspect='auto', origin='lower')
+            plt.title('Feature prediction by audio    {}'.format(title))
+            plt.colorbar(ax= ax)
+            ax = plt.subplot2grid((5, 1), (2, 0))
             plt.plot(prediction[:feature_length * self.hp.Sound.Frame_Shift])
             plt.title('Audio prediction    {}'.format(title))
             plt.margins(x= 0)
             plt.colorbar(ax= ax)
-            ax = plt.subplot2grid((4, 1), (1, 0))
-            plt.imshow(feature[:, :feature_length], aspect='auto', origin='lower')
-            plt.title('Feature prediction    {}'.format(title))
-            plt.colorbar(ax= ax)
-            ax = plt.subplot2grid((4, 1), (2, 0), rowspan= 2)
+            ax = plt.subplot2grid((5, 1), (3, 0), rowspan= 2)
             plt.plot(duration[:feature_length])
             plt.title('Duration    {}'.format(title))
             plt.margins(x= 0)
@@ -548,7 +567,7 @@ class Trainer:
             wavfile.write(
                 os.path.join(self.hp.Inference_Path, 'Step-{}'.format(self.steps), 'WAV', '{}.wav'.format(file)).replace('\\', '/'),
                 self.hp.Sound.Sample_Rate,
-                (prediction * 32767.5).astype(np.int32)
+                (prediction * 32767.5).astype(np.int16)
                 )
             
     def Inference_Epoch(self):
@@ -627,8 +646,8 @@ class Trainer:
             os.makedirs(self.hp.Checkpoint_Path, exist_ok= True)
             copyfile(self.hp_path, hp_path)
 
-        if self.steps == 0:
-            self.Evaluation_Epoch()
+        # if self.steps == 0:
+        #     self.Evaluation_Epoch()
 
         if self.hp.Train.Initial_Inference:
             self.Inference_Epoch()
